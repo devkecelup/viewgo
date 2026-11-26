@@ -79,6 +79,37 @@ struct AudioPlayer {
     stdin: BufWriter<std::process::ChildStdin>,
 }
 
+fn audio_output_available() -> bool {
+    #[cfg(windows)]
+    {
+        return Command::new("ffplay")
+            .args([
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "quiet",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=8000:cl=mono",
+                "-t",
+                "0.1",
+                "-f",
+                "null",
+                "-",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
+}
+
 fn main() {
     let port = env::args()
         .nth(1)
@@ -215,10 +246,15 @@ fn serve(
                     Arc::clone(&frame_seq),
                 )?;
                 if dimensions_changed {
+                    builder.stop_audio();
+                    received = 0;
+                    window_start = Instant::now();
+                    frames_in_window = 0;
                     let mut guard = latest.lock().unwrap();
                     guard.frame = None;
                     guard.width = 0;
                     guard.height = 0;
+                    frame_seq.fetch_add(1, Ordering::Relaxed);
                 }
                 shared.set_status(format!("Connected {peer} — {width}x{height} — {fps} fps"));
             }
@@ -263,7 +299,13 @@ fn serve(
                         "unsupported audio format",
                     ));
                 }
-                if let Err(error) = builder.start_audio(sample_rate, channels) {
+                let output_enabled = audio_output_available();
+                if !output_enabled {
+                    eprintln!(
+                        "Audio forwarding off: Windows audio output device is unavailable or busy"
+                    );
+                }
+                if let Err(error) = builder.ensure_audio(sample_rate, channels, output_enabled) {
                     eprintln!("Audio output unavailable (is ffplay installed?): {error}");
                 }
             }
@@ -535,18 +577,23 @@ impl FfmpegBuilder {
             ));
         }
         let ffplay = env::var("FFPLAY").unwrap_or_else(|_| "ffplay".to_string());
+        let rate = sample_rate.to_string();
+        let channel_count = channels.to_string();
         let mut child = Command::new(ffplay)
+            .args(["-nodisp", "-loglevel", "error"])
             .args([
-                "-nodisp",
-                "-autoexit",
-                "-loglevel",
-                "error",
                 "-f",
                 "s16le",
                 "-ar",
-                &sample_rate.to_string(),
+                &rate,
                 "-ac",
-                &channels.to_string(),
+                &channel_count,
+                "-blocksize",
+                "4096",
+                "-fflags",
+                "nobuffer",
+                "-flags",
+                "low_delay",
                 "-i",
                 "pipe:0",
             ])
@@ -566,6 +613,19 @@ impl FfmpegBuilder {
         Ok(())
     }
 
+    fn ensure_audio(
+        &mut self,
+        sample_rate: u32,
+        channels: u8,
+        enabled: bool,
+    ) -> std::io::Result<()> {
+        self.stop_audio();
+        if enabled {
+            self.start_audio(sample_rate, channels)?;
+        }
+        Ok(())
+    }
+
     fn write_audio(&mut self, pcm: &[u8]) {
         if let Some(audio) = self.audio.as_mut() {
             if let Err(error) = audio.stdin.write_all(pcm).and_then(|_| audio.stdin.flush()) {
@@ -580,6 +640,10 @@ impl FfmpegBuilder {
             let _ = audio.child.kill();
             let _ = audio.child.wait();
         }
+    }
+
+    fn stop_audio(&mut self) {
+        self.kill_audio();
     }
 }
 
@@ -631,6 +695,7 @@ fn run_window(
     let mut frame_w = 0usize;
     let mut frame_h = 0usize;
     let mut seen = 0u64;
+    let mut displayed = Vec::<u32>::new();
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let next_seq = frame_seq.load(Ordering::Relaxed);
@@ -663,7 +728,22 @@ fn run_window(
 
         if frame_w > 0 && frame_h > 0 && !pixels.is_empty() {
             let (window_w, window_h) = window.get_size();
-            let _ = window.update_with_buffer(&pixels, window_w.max(1), window_h.max(1));
+            let (window_w, window_h) = (window_w.max(1), window_h.max(1));
+            if displayed.len() != window_w * window_h {
+                displayed.resize(window_w * window_h, 0);
+            }
+            displayed.fill(0);
+            let (draw_w, draw_h) = fit_size(frame_w, frame_h, window_w, window_h);
+            let left = (window_w - draw_w) / 2;
+            let top = (window_h - draw_h) / 2;
+            for y in 0..draw_h {
+                for x in 0..draw_w {
+                    let sx = x * window_w / draw_w;
+                    let sy = y * window_h / draw_h;
+                    displayed[(top + y) * window_w + left + x] = pixels[sy * window_w + sx];
+                }
+            }
+            let _ = window.update_with_buffer(&displayed, window_w, window_h);
         } else {
             let _ = window.update();
         }

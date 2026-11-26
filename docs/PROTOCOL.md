@@ -83,6 +83,9 @@ a counter it has already seen for a direction.
 0x07  STOP         no args
 ```
 
+The phone sends raw playback PCM only when the user enabled audio. The receiver may report audio
+output unavailable and discard PCM if Windows has no usable playback device; video continues.
+
 Annex-B is required: NAL units separated by `00 00 00 01` or `00 00 01`. Keyframe frames include
 SPS and PPS before the IDR slice. Audio capture is Android playback-capture PCM; apps that deny
 capture (including protected/DRM playback) produce no audio by platform policy.

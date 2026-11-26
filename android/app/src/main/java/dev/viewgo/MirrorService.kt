@@ -43,10 +43,13 @@ class MirrorService : Service() {
         const val EXTRA_BITRATE = "bitrate"
         const val EXTRA_RESULT_CODE = "resultCode"
         const val EXTRA_RESULT_DATA = "resultData"
+        const val EXTRA_AUDIO = "audio"
 
         private const val CHANNEL = "viewgo"
         private const val NOTIFICATION_ID = 1
         private const val FPS = 30
+        private const val SERVICE_TYPE_MEDIA_PROJECTION = 0x00000020
+        private const val SERVICE_TYPE_MEDIA_PLAYBACK = 0x00000002
     }
 
     @Volatile
@@ -90,6 +93,7 @@ class MirrorService : Service() {
         val maxHeight = intent.getIntExtra(EXTRA_HEIGHT, 1920)
         val bitrate = intent.getIntExtra(EXTRA_BITRATE, 12_000_000)
 
+        intentAudioRequested = intent.getBooleanExtra(EXTRA_AUDIO, true)
         startForegroundCompat("Connecting to $host…")
         running = true
         AppLog.line("Connecting to $host:$port")
@@ -114,13 +118,14 @@ class MirrorService : Service() {
                 val capture = manager.getMediaProjection(resultCode, resultData)
                     ?: throw IOException("Screen capture permission was lost.")
                 projection = capture
+                val audioRequested = intentAudioRequested
                 capture.registerCallback(object : MediaProjection.Callback() {
                     override fun onStop() {
                         stopMirroring("Screen capture stopped")
                     }
                 }, Handler(Looper.getMainLooper()))
 
-                mirror(session, capture, maxWidth, maxHeight, bitrate)
+                mirror(session, capture, maxWidth, maxHeight, bitrate, audioRequested)
             } catch (error: Throwable) {
                 AppLog.line("Stopped: ${error.message ?: error.javaClass.simpleName}")
                 if (running) stopMirroring("Stopped: ${error.message ?: error.javaClass.simpleName}")
@@ -187,6 +192,7 @@ class MirrorService : Service() {
         requestedWidth: Int,
         requestedHeight: Int,
         requestedBitrate: Int,
+        audioRequested: Boolean,
     ) {
         var maxWidth = requestedWidth
         var maxHeight = requestedHeight
@@ -208,7 +214,7 @@ class MirrorService : Service() {
         updateNotification("Mirroring ${opened.width}×${opened.height}")
         AppLog.line("Mirroring ${opened.width}×${opened.height} at ${bitrate / 1_000_000} Mbps")
 
-        val audio = startAudioCapture(projection, session)
+        val audio = if (audioRequested) startAudioCapture(projection, session) else null
         val audioThread = startAudioThread(session, audio)
         sendVideoConfig(session, opened.width, opened.height)
         var csd = runCatching { readCsd(opened.codec.outputFormat) }.getOrNull()
@@ -356,6 +362,23 @@ class MirrorService : Service() {
     }
 
     private fun startAudioCapture(projection: MediaProjection, session: Link): AudioRecord? = try {
+        val record = createAudioRecord(projection)
+        if (record.state != AudioRecord.STATE_INITIALIZED) {
+            record.release()
+            throw IOException("Android playback capture could not initialize")
+        }
+        audioRecord = record
+        session.send(Proto.T_AUDIO_CONFIG, byteArrayOf(0, 0, 0xBB.toByte(), 0x80.toByte(), 2))
+        record.startRecording()
+        AppLog.line("Internal playback capture active; Android may still block individual apps")
+        record
+    } catch (error: Exception) {
+        AppLog.line("Internal audio unavailable: ${error.message ?: error.javaClass.simpleName}")
+        null
+    }
+
+    private fun createAudioRecord(projection: MediaProjection): AudioRecord {
+        if (Build.VERSION.SDK_INT < 29) throw IOException("Android 10 or newer is required for playback capture")
         val config = AudioPlaybackCaptureConfiguration.Builder(projection)
             .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
             .addMatchingUsage(AudioAttributes.USAGE_GAME)
@@ -365,23 +388,11 @@ class MirrorService : Service() {
             .setSampleRate(48_000)
             .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
             .build()
-        val record = AudioRecord.Builder()
+        return AudioRecord.Builder()
             .setAudioFormat(format)
             .setAudioPlaybackCaptureConfig(config)
             .setBufferSizeInBytes(48_000 * 2 * 2 / 5)
             .build()
-        if (record.state != AudioRecord.STATE_INITIALIZED) {
-            record.release()
-            throw IOException("Android playback capture could not initialize")
-        }
-        audioRecord = record
-        session.send(Proto.T_AUDIO_CONFIG, byteArrayOf(0, 0, 0xBB.toByte(), 0x80.toByte(), 2))
-        record.startRecording()
-        AppLog.line("Internal playback audio capture started (some apps block capture)")
-        record
-    } catch (error: Exception) {
-        AppLog.line("Internal audio unavailable: ${error.message ?: error.javaClass.simpleName}")
-        null
     }
 
     private fun readCsd(format: MediaFormat): ByteArray? {
@@ -469,12 +480,15 @@ class MirrorService : Service() {
             startForeground(
                 NOTIFICATION_ID,
                 notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
+                    if (intentAudioRequested) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK else 0,
             )
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
     }
+
+    private var intentAudioRequested = true
 
     private fun updateNotification(text: String) {
         runCatching {

@@ -29,8 +29,11 @@ class MainActivity : Activity() {
     private lateinit var codeField: EditText
     private lateinit var qualityField: Spinner
     private lateinit var shareField: Spinner
+    private lateinit var audioField: Spinner
     private lateinit var statusLabel: TextView
     private lateinit var logView: TextView
+    private var selectedHost: String? = null
+    private var selectedPort: Int = 47810
     private val handler = Handler(Looper.getMainLooper())
     private val refreshLog = object : Runnable {
         override fun run() {
@@ -48,6 +51,7 @@ class MainActivity : Activity() {
         val width: Int,
         val height: Int,
         val bitrate: Int,
+        val audio: Boolean,
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -100,6 +104,13 @@ class MainActivity : Activity() {
                 },
             )
         }
+        audioField = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                listOf("Internal audio on", "Internal audio off"),
+            )
+        }
 
         val connect = Button(this).apply {
             text = "Connect"
@@ -134,7 +145,7 @@ class MainActivity : Activity() {
             }
         }
 
-        listOf(title, intro, audioHint, discover, codeField, qualityField, shareField, connect, stop, statusLabel).forEach {
+        listOf(title, intro, discover, codeField, qualityField, shareField, audioField, audioHint, connect, stop, statusLabel).forEach {
             root.addView(it, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
         root.addView(TextView(this).apply {
@@ -171,6 +182,7 @@ class MainActivity : Activity() {
             return
         }
         val quality = qualityField.selectedItemPosition
+        val audio = audioField.selectedItemPosition == 0
         pending = Pending(
             host = host,
             port = selectedPort,
@@ -178,6 +190,7 @@ class MainActivity : Activity() {
             width = if (quality == 0) 1080 else 720,
             height = if (quality == 0) 1920 else 1280,
             bitrate = if (quality == 0) 12_000_000 else 6_000_000,
+            audio = audio,
         )
         val manager = getSystemService(MediaProjectionManager::class.java)
         val shareApp = Build.VERSION.SDK_INT >= 34 && shareField.selectedItemPosition == 1
@@ -215,6 +228,7 @@ class MainActivity : Activity() {
             putExtra(MirrorService.EXTRA_WIDTH, job.width)
             putExtra(MirrorService.EXTRA_HEIGHT, job.height)
             putExtra(MirrorService.EXTRA_BITRATE, job.bitrate)
+            putExtra(MirrorService.EXTRA_AUDIO, job.audio)
             putExtra(MirrorService.EXTRA_RESULT_CODE, resultCode)
             putExtra(MirrorService.EXTRA_RESULT_DATA, data)
         }
@@ -274,6 +288,4 @@ class MainActivity : Activity() {
         private const val REQUEST_CAPTURE = 1001
     }
 
-    private var selectedHost: String? = null
-    private var selectedPort: Int = 47810
 }

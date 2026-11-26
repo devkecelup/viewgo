@@ -24,8 +24,8 @@ Read `PRD.md` for scope and `docs/PROTOCOL.md` for the wire format.
   rotation keeps the stream running instead of stopping it.
 - Android 14+ can share only one chosen app instead of the whole screen; earlier versions share the
   whole screen.
-- Capturable internal media/game audio streams as PCM over the encrypted session; Android or an
-  individual app may block playback capture.
+- Optional internal media/game audio streams over the encrypted session; enable it on the phone,
+  and install `ffplay` on Windows. Android or an individual app may block playback capture.
 - Laptop shows the stream in a small window, with resolution and measured frame rate in the title.
 - Stop from the phone app, the notification, the laptop (Esc / close window), or by revoking capture.
 - Phone log: shown in the app, sent to the laptop over the same encrypted connection (printed as
@@ -96,6 +96,8 @@ cargo run --example send_sim -- 127.0.0.1 47810 <pairing code> sample.h264 1080 
   keyframe; the receiver restarts its decoder and keeps the window.
 - Games and apps that mark their window as secure (many banking apps and some DRM/game surfaces)
   are captured as black by Android; that is the platform's protection, not a ViewGo bug.
+- Single-app capture requires Android 14+ and the **Share one app** option before opening the
+  system consent screen. If Android/OEM disables that option, ViewGo cannot override system policy.
 - Playback audio capture is best-effort. Apps that mark audio as non-capturable (often DRM/voice apps)
   will stay silent by Android policy.
 - Software H.264 decode on the laptop through ffmpeg; hardware decode is a later step.
