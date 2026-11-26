@@ -26,11 +26,13 @@ Read `PRD.md` for scope and `docs/PROTOCOL.md` for the wire format.
   whole screen.
 - Optional internal media/game audio streams over the encrypted session; enable it on the phone,
   and install `ffplay` on Windows. Android or an individual app may block playback capture.
-- Laptop shows the stream in a resizable window (maximize it: the picture gets bigger and reads
-  sharper), with resolution and measured frame rate in the title.
-- Stop from the phone app, the notification, the laptop (Esc / close window), or by revoking capture.
-- Phone log: shown in the app, sent to the laptop over the same encrypted connection (printed as
-  `phone: ...`), and shareable with **Share log** when no connection was made.
+- The laptop opens a native ViewGo window (white/green theme) with the pairing code, live status,
+  the measured resolution and frame rate, a log panel for phone logs and receiver events, and the
+  stream. Maximize it: the picture gets bigger and reads sharper.
+- Stop from the phone app, the notification, or the laptop (Quit / close window), or by revoking
+  capture.
+- Phone log is shown on the laptop (log panel and `phone: ...`); the Android app keeps its log
+  screen-free and only streams it over the encrypted connection.
 
 ## Requirements
 
@@ -116,6 +118,6 @@ cargo run --example send_sim -- 127.0.0.1 47810 <pairing code> sample.h264 1080 
 
 ```
 docs/PROTOCOL.md   wire format and handshake
-receiver/          Rust Windows receiver (ffmpeg decode + minifb window)
+receiver/          Rust Windows receiver (ffmpeg decode + native egui window)
 android/           Kotlin capture/encode app (no AndroidX)
 ```

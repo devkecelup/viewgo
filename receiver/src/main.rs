@@ -1,24 +1,52 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // ViewGo receiver: pairs with an Android sender, decrypts H.264 frames, decodes them with
-// ffmpeg and shows the newest frame in a small window.
+// ffmpeg and shows the newest frame in a native egui window (white/green, per design-taste).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use viewgo_receiver::protocol::*;
 
+use eframe::egui;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
-use minifb::{Key, Window, WindowOptions};
 
 const DEFAULT_PORT: u16 = 47810;
 const CODE_TTL: Duration = Duration::from_secs(120);
 const ATTEMPT_WINDOW: Duration = Duration::from_secs(60);
 const MAX_ATTEMPTS_PER_IP: u32 = 5;
+const LOG_CAP: usize = 400;
+
+// A single log the GUI panel reads. Writes to stdout are ignored so a release build (windowed
+// subsystem, no console) never panics on a closed handle.
+static LOG: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+
+fn log(text: impl Into<String>) {
+    let text = text.into();
+    let _ = writeln!(std::io::stdout(), "{text}");
+    let mut guard = LOG
+        .get_or_init(|| Mutex::new(VecDeque::new()))
+        .lock()
+        .unwrap();
+    guard.push_back(text);
+    while guard.len() > LOG_CAP {
+        guard.pop_front();
+    }
+}
+
+fn log_lines() -> Vec<String> {
+    LOG.get_or_init(|| Mutex::new(VecDeque::new()))
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect()
+}
 
 struct Shared {
     code: Mutex<(String, Instant)>,
@@ -122,19 +150,21 @@ fn main() {
     let frame_seq = Arc::new(AtomicU64::new(0));
 
     let listener = match TcpListener::bind(("0.0.0.0", port)) {
-        Ok(listener) => listener,
+        Ok(listener) => Some(listener),
         Err(error) => {
-            eprintln!("Cannot listen on port {port}: {error}");
-            return;
+            // Still open the window so the failure is readable instead of exiting silently.
+            shared.set_status(format!("Cannot listen on port {port}: {error}"));
+            log(format!("Cannot listen on port {port}: {error}"));
+            None
         }
     };
 
     let code = shared.issue_code();
     let _mdns = publish_receiver(port);
-    println!("ViewGo receiver listening on port {port}");
-    println!("On Android, tap Find laptop; pairing code: {code}  (valid 120 seconds)");
+    log(format!("ViewGo receiver listening on port {port}"));
+    log(format!("Pairing code: {code}  (valid 120 seconds)"));
 
-    {
+    if let Some(listener) = listener {
         let shared = Arc::clone(&shared);
         let latest = Arc::clone(&latest);
         let spares = Arc::clone(&spares);
@@ -142,7 +172,7 @@ fn main() {
         thread::spawn(move || accept_loop(listener, shared, latest, spares, frame_seq));
     }
 
-    run_window(shared, latest, spares, frame_seq, port);
+    run_gui(shared, latest, spares, frame_seq, port);
 }
 
 fn accept_loop(
@@ -168,7 +198,7 @@ fn accept_loop(
             reject.extend_from_slice(&random_bytes::<16>());
             let _ = write_frame(&mut stream, &reject);
             let _ = stream.flush();
-            println!("Rejected pairing (laptop already has a session)");
+            log("Rejected pairing (laptop already has a session)".to_string());
             drop(stream);
             continue;
         }
@@ -183,12 +213,12 @@ fn accept_loop(
         thread::spawn(move || {
             let _ = stream.set_nodelay(true);
             if let Err(error) = serve(stream, peer, &shared, latest, spares, frame_seq) {
-                println!("Session ended: {error}");
+                log(format!("Session ended: {error}"));
             }
             *shared.active.lock().unwrap() = false;
             shared.set_status("Waiting for a phone");
             let code = shared.issue_code();
-            println!("Pairing code: {code}  (valid 120 seconds)");
+            log(format!("Pairing code: {code}  (valid 120 seconds)"));
         });
     }
 }
@@ -305,7 +335,9 @@ fn serve(
                 // No availability probe: ffplay tells us itself by exiting, which is reported
                 // once from write_audio while the video keeps running.
                 if let Err(error) = builder.reset_audio(sample_rate, channels) {
-                    eprintln!("Audio output unavailable (is ffplay installed?): {error}");
+                    log(format!(
+                        "Audio output unavailable (is ffplay installed?): {error}"
+                    ));
                 }
             }
             T_AUDIO_FRAME => {
@@ -320,14 +352,14 @@ fn serve(
                         "log too long",
                     ));
                 }
-                println!("phone: {}", String::from_utf8_lossy(&plain[1..]));
+                log(format!("phone: {}", String::from_utf8_lossy(&plain[1..])));
             }
             T_STOP => break,
             T_CONTROL => {}
             _ => {}
         }
     }
-    println!("Session closed after {received} frames");
+    log(format!("Session closed after {received} frames"));
     Ok(())
 }
 
@@ -407,7 +439,7 @@ fn handshake(
     stream.flush()?;
 
     if status != STATUS_OK {
-        println!("Rejected pairing from {peer} (status {status})");
+        log(format!("Rejected pairing from {peer} (status {status})"));
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "pairing rejected",
@@ -435,7 +467,7 @@ fn handshake(
         reject.extend_from_slice(&server_random);
         let _ = write_frame(stream, &reject);
         let _ = stream.flush();
-        println!("Rejected pairing from {peer} (wrong code)");
+        log(format!("Rejected pairing from {peer} (wrong code)"));
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "wrong code",
@@ -454,7 +486,7 @@ fn handshake(
         let mut code = shared.code.lock().unwrap();
         code.1 = Instant::now();
     }
-    println!("Paired with {peer}");
+    log(format!("Paired with {peer}"));
     Ok(Handshake { key })
 }
 
@@ -649,8 +681,8 @@ impl FfmpegBuilder {
         };
         if failed {
             self.audio.take();
-            eprintln!(
-                "Audio output stopped: ffplay exited or the Windows playback device is unavailable"
+            log(
+                "Audio output stopped: ffplay exited or the Windows playback device is unavailable",
             );
         }
     }
@@ -683,90 +715,361 @@ impl Drop for AudioPlayer {
     }
 }
 
-fn run_window(
+fn run_gui(
     shared: Arc<Shared>,
     latest: Arc<Mutex<Latest>>,
     spares: Arc<Mutex<Vec<Vec<u8>>>>,
     frame_seq: Arc<AtomicU64>,
     port: u16,
 ) {
-    let mut window = match Window::new(
-        "ViewGo",
-        540,
-        960,
-        WindowOptions {
-            resize: true,
-            ..WindowOptions::default()
-        },
-    ) {
-        Ok(window) => window,
-        Err(error) => {
-            eprintln!("Cannot open window: {error}");
-            return;
-        }
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1120.0, 780.0])
+            .with_min_inner_size([760.0, 540.0]),
+        ..Default::default()
     };
-    window.set_target_fps(60);
+    if let Err(error) = eframe::run_native(
+        "ViewGo",
+        options,
+        Box::new(move |cc| ViewGoApp::init(cc, shared, latest, spares, frame_seq, port)),
+    ) {
+        log(format!("Cannot open window: {error}"));
+    }
+}
 
-    let mut pixels = Vec::<u32>::new();
-    let mut frame_w = 0usize;
-    let mut frame_h = 0usize;
-    let mut seen = 0u64;
-    // Keep the newest decoded frame so the picture is re-scaled when the window is resized,
-    // not only when a new frame happens to arrive (otherwise a maximize shows stale content).
-    let mut last: Option<(Vec<u8>, usize, usize)> = None;
-    let mut last_size = (0usize, 0usize);
+// Palette dealt by design-taste-frontend (`start.mjs brand --page software --bg #fff
+// --accent #0f7b4f --radius soft`): white ground, green action.
+const BG: egui::Color32 = egui::Color32::from_rgb(0xff, 0xff, 0xff);
+const SURFACE: egui::Color32 = egui::Color32::from_rgb(0xf1, 0xf2, 0xf3);
+const BORDER: egui::Color32 = egui::Color32::from_rgb(0xe4, 0xe7, 0xeb);
+const INK: egui::Color32 = egui::Color32::from_rgb(0x10, 0x18, 0x28);
+const MUTED: egui::Color32 = egui::Color32::from_rgb(0x5f, 0x67, 0x72);
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x0f, 0x7b, 0x4f);
+const ACCENT_INK: egui::Color32 = egui::Color32::from_rgb(0xff, 0xff, 0xff);
 
-    while window.is_open() && !window.is_key_down(Key::Escape) {
-        let next_seq = frame_seq.load(Ordering::Relaxed);
-        let mut fresh = false;
-        if next_seq != seen {
-            let mut guard = latest.lock().unwrap();
-            if let Some(frame) = guard.frame.take() {
-                seen = guard.seq;
-                frame_w = guard.width;
-                frame_h = guard.height;
-                fresh = true;
-                if let Some((old, _, _)) = last.replace((frame, frame_w, frame_h)) {
-                    if let Ok(mut pool) = spares.lock() {
-                        if pool.len() < 3 {
-                            pool.push(old);
+struct ViewGoApp {
+    shared: Arc<Shared>,
+    latest: Arc<Mutex<Latest>>,
+    spares: Arc<Mutex<Vec<Vec<u8>>>>,
+    frame_seq: Arc<AtomicU64>,
+    port: u16,
+    seen: u64,
+    last: Option<(Vec<u8>, usize, usize)>,
+    scaled: Vec<u32>,
+    area: (usize, usize),
+    tex_size: (usize, usize),
+    texture: Option<egui::TextureHandle>,
+}
+
+impl ViewGoApp {
+    fn init(
+        cc: &eframe::CreationContext<'_>,
+        shared: Arc<Shared>,
+        latest: Arc<Mutex<Latest>>,
+        spares: Arc<Mutex<Vec<Vec<u8>>>>,
+        frame_seq: Arc<AtomicU64>,
+        port: u16,
+    ) -> Result<Box<dyn eframe::App>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut visuals = egui::Visuals::light();
+        visuals.panel_fill = BG;
+        visuals.window_fill = BG;
+        visuals.override_text_color = Some(INK);
+        visuals.extreme_bg_color = SURFACE;
+        visuals.faint_bg_color = SURFACE;
+        visuals.selection.bg_fill = ACCENT;
+        visuals.hyperlink_color = ACCENT;
+        visuals.widgets.noninteractive.bg_fill = SURFACE;
+        visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(8);
+        visuals.widgets.inactive.bg_fill = SURFACE;
+        visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, INK);
+        visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(8);
+        visuals.widgets.hovered.bg_fill = BORDER;
+        visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(8);
+        visuals.widgets.active.bg_fill = ACCENT;
+        visuals.widgets.active.fg_stroke = egui::Stroke::new(1.4, ACCENT_INK);
+        visuals.widgets.active.corner_radius = egui::CornerRadius::same(8);
+        cc.egui_ctx.set_visuals(visuals);
+
+        Ok(Box::new(ViewGoApp {
+            shared,
+            latest,
+            spares,
+            frame_seq,
+            port,
+            seen: 0,
+            last: None,
+            scaled: Vec::new(),
+            area: (0, 0),
+            tex_size: (0, 0),
+            texture: None,
+        }))
+    }
+
+    /// Takes the newest decoded frame; returns true when one arrived.
+    fn take_frame(&mut self) -> bool {
+        if self.frame_seq.load(Ordering::Relaxed) == self.seen {
+            return false;
+        }
+        let mut guard = self.latest.lock().unwrap();
+        let Some(frame) = guard.frame.take() else {
+            return false;
+        };
+        self.seen = guard.seq;
+        let size = (guard.width, guard.height);
+        drop(guard);
+        if let Some((old, _, _)) = self.last.replace((frame, size.0, size.1)) {
+            if let Ok(mut pool) = self.spares.lock() {
+                if pool.len() < 3 {
+                    pool.push(old);
+                }
+            }
+        }
+        true
+    }
+}
+
+impl eframe::App for ViewGoApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Owned clone so the panel closures can use it while `ui` is borrowed.
+        let ctx = ui.ctx().clone();
+        // Keep status, code and log live even when no video frames arrive.
+        ctx.request_repaint_after(Duration::from_millis(16));
+
+        let status = self.shared.status.lock().unwrap().clone();
+        let code = self.shared.current_code();
+        let active = *self.shared.active.lock().unwrap();
+        let port = self.port;
+
+        egui::Panel::top("header").exact_size(60.0).show(ui, |ui| {
+            ui.horizontal_centered(|ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
+                paint_mark(ui.painter(), rect);
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new("ViewGo").size(20.0).strong().color(INK));
+                ui.add_space(14.0);
+                badge(ui, active);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Quit").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    ui.label(
+                        egui::RichText::new(format!("port {port}"))
+                            .size(13.0)
+                            .color(MUTED),
+                    );
+                });
+            });
+        });
+
+        egui::Panel::bottom("log")
+            .resizable(true)
+            .default_size(150.0)
+            .min_size(90.0)
+            .show(ui, |ui| {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Log").size(12.0).color(MUTED));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new("phone logs and receiver events")
+                                .size(11.0)
+                                .color(MUTED),
+                        );
+                    });
+                });
+                ui.add_space(2.0);
+                egui::ScrollArea::vertical()
+                    .stick_to_bottom(true)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for line in log_lines() {
+                            ui.label(
+                                egui::RichText::new(line)
+                                    .monospace()
+                                    .size(12.0)
+                                    .color(MUTED),
+                            );
+                        }
+                    });
+            });
+
+        egui::Panel::right("side").exact_size(334.0).show(ui, |ui| {
+            card(ui, |ui| {
+                ui.label(egui::RichText::new("Pairing code").size(13.0).color(MUTED));
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(code)
+                        .monospace()
+                        .size(54.0)
+                        .strong()
+                        .color(INK),
+                );
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new("Valid 120 seconds, single use")
+                        .size(12.0)
+                        .color(MUTED),
+                );
+            });
+            ui.add_space(14.0);
+            card(ui, |ui| {
+                ui.label(egui::RichText::new("Session").size(13.0).color(MUTED));
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new(status).size(15.0).color(INK));
+            });
+            ui.add_space(14.0);
+            card(ui, |ui| {
+                ui.label(
+                    egui::RichText::new("How to connect")
+                        .size(13.0)
+                        .color(MUTED),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("1.  Open ViewGo on your phone.")
+                        .size(14.0)
+                        .color(INK),
+                );
+                ui.label(
+                    egui::RichText::new("2.  Tap Find laptop on the same Wi-Fi.")
+                        .size(14.0)
+                        .color(INK),
+                );
+                ui.label(
+                    egui::RichText::new("3.  Type the code above, then Connect.")
+                        .size(14.0)
+                        .color(INK),
+                );
+            });
+        });
+
+        egui::CentralPanel::default().show(ui, |ui| {
+            let avail = ui.available_size();
+            let area = ((avail.x.max(1.0)) as usize, (avail.y.max(1.0)) as usize);
+            let fresh = self.take_frame();
+            if (fresh || self.area != area) && self.last.is_some() {
+                let (frame, fw, fh) = self.last.as_ref().unwrap();
+                let (dw, dh) = fit_size(*fw, *fh, area.0, area.1);
+                if dw > 0 && dh > 0 {
+                    if self.scaled.len() != dw * dh {
+                        self.scaled.resize(dw * dh, 0);
+                    }
+                    self.scaled.fill(0);
+                    scale_fit_bgra(frame, *fw, *fh, &mut self.scaled, dw, dh);
+                    let pixels: Vec<egui::Color32> = self
+                        .scaled
+                        .iter()
+                        .map(|&p| {
+                            egui::Color32::from_rgb(
+                                ((p >> 16) & 0xff) as u8,
+                                ((p >> 8) & 0xff) as u8,
+                                (p & 0xff) as u8,
+                            )
+                        })
+                        .collect();
+                    let image = egui::ColorImage {
+                        size: [dw, dh],
+                        source_size: egui::vec2(dw as f32, dh as f32),
+                        pixels,
+                    };
+                    match &mut self.texture {
+                        Some(handle) => handle.set(image, egui::TextureOptions::LINEAR),
+                        None => {
+                            self.texture = Some(ctx.load_texture(
+                                "mirror",
+                                image,
+                                egui::TextureOptions::LINEAR,
+                            ))
                         }
                     }
+                    self.tex_size = (dw, dh);
+                    self.area = area;
                 }
             }
-        }
 
-        let (window_w, window_h) = window.get_size();
-        let (window_w, window_h) = (window_w.max(1), window_h.max(1));
-        let resized = last_size != (window_w, window_h);
-        if (fresh || resized) && frame_w > 0 && frame_h > 0 {
-            if let Some((frame, w, h)) = last.as_ref() {
-                if pixels.len() != window_w * window_h {
-                    pixels.resize(window_w * window_h, 0);
-                }
-                pixels.fill(0x000000);
-                scale_fit_bgra(frame, *w, *h, &mut pixels, window_w, window_h);
-                last_size = (window_w, window_h);
-            }
-        }
-
-        let code = shared.current_code();
-        let status = shared.status.lock().unwrap().clone();
-        window.set_title(&format!("ViewGo — {status} — port {port} — code {code}"));
-
-        if frame_w > 0 && frame_h > 0 && pixels.len() == window_w * window_h {
-            let _ = window.update_with_buffer(&pixels, window_w, window_h);
-        } else {
-            let _ = window.update();
-        }
+            ui.with_layout(
+                egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                |ui| match (&self.texture, self.tex_size) {
+                    (Some(tex), (dw, dh)) if dw > 0 && dh > 0 => {
+                        let size = egui::vec2(dw as f32, dh as f32);
+                        ui.add(egui::Image::new((tex.id(), size)).fit_to_exact_size(size));
+                    }
+                    _ => {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(50.0);
+                            ui.label(
+                                egui::RichText::new("Waiting for a phone")
+                                    .size(26.0)
+                                    .color(MUTED),
+                            );
+                            ui.add_space(12.0);
+                            ui.label(
+                                egui::RichText::new(
+                                    "Type the pairing code on your phone, on the same Wi-Fi.",
+                                )
+                                .size(15.0)
+                                .color(MUTED),
+                            );
+                        });
+                    }
+                },
+            );
+        });
     }
+}
+
+fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    let style = ui.style().clone();
+    egui::Frame::group(&style)
+        .fill(BG)
+        .stroke(egui::Stroke::new(1.0, BORDER))
+        .corner_radius(egui::CornerRadius::same(12))
+        .inner_margin(egui::Margin::same(16))
+        .show(ui, add);
+    ui.add_space(2.0);
+}
+
+fn badge(ui: &mut egui::Ui, active: bool) {
+    let label = if active {
+        "Mirroring"
+    } else {
+        "Waiting for a phone"
+    };
+    let colour = if active { ACCENT_INK } else { MUTED };
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_string(), egui::FontId::proportional(13.0), colour);
+    let pad = egui::vec2(13.0, 7.0);
+    let size = galley.size() + pad * 2.0;
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    ui.painter().rect_filled(
+        rect,
+        egui::CornerRadius::same((size.y / 2.0) as u8),
+        if active { ACCENT } else { SURFACE },
+    );
+    ui.painter().galley(rect.min + pad, galley, colour);
+}
+
+fn paint_mark(painter: &egui::Painter, rect: egui::Rect) {
+    painter.rect_filled(rect, egui::CornerRadius::same(9), ACCENT);
+    let screen = egui::Rect::from_center_size(
+        egui::pos2(rect.center().x, rect.center().y - rect.height() * 0.06),
+        egui::vec2(rect.width() * 0.56, rect.height() * 0.40),
+    );
+    painter.rect_filled(screen, egui::CornerRadius::same(2), BG);
+    let stand = egui::Rect::from_center_size(
+        egui::pos2(rect.center().x, rect.max.y - rect.height() * 0.19),
+        egui::vec2(rect.width() * 0.34, 2.0),
+    );
+    painter.rect_filled(stand, 0.0, BG);
 }
 
 fn publish_receiver(port: u16) -> Option<ServiceDaemon> {
     let daemon = match ServiceDaemon::new() {
         Ok(daemon) => daemon,
         Err(error) => {
-            eprintln!("Local discovery unavailable: {error}");
+            log(format!("Local discovery unavailable: {error}"));
             return None;
         }
     };
@@ -780,13 +1083,13 @@ fn publish_receiver(port: u16) -> Option<ServiceDaemon> {
     ) {
         Ok(info) => info.enable_addr_auto(),
         Err(error) => {
-            eprintln!("Local discovery unavailable: {error}");
+            log(format!("Local discovery unavailable: {error}"));
             let _ = daemon.shutdown();
             return None;
         }
     };
     if let Err(error) = daemon.register(info) {
-        eprintln!("Local discovery unavailable: {error}");
+        log(format!("Local discovery unavailable: {error}"));
         let _ = daemon.shutdown();
         return None;
     }
