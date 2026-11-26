@@ -79,37 +79,6 @@ struct AudioPlayer {
     stdin: BufWriter<std::process::ChildStdin>,
 }
 
-fn audio_output_available() -> bool {
-    #[cfg(windows)]
-    {
-        return Command::new("ffplay")
-            .args([
-                "-nodisp",
-                "-autoexit",
-                "-loglevel",
-                "quiet",
-                "-f",
-                "lavfi",
-                "-i",
-                "anullsrc=r=8000:cl=mono",
-                "-t",
-                "0.1",
-                "-f",
-                "null",
-                "-",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-    }
-    #[cfg(not(windows))]
-    {
-        true
-    }
-}
-
 fn main() {
     let port = env::args()
         .nth(1)
@@ -246,7 +215,6 @@ fn serve(
                     Arc::clone(&frame_seq),
                 )?;
                 if dimensions_changed {
-                    builder.stop_audio();
                     received = 0;
                     window_start = Instant::now();
                     frames_in_window = 0;
@@ -299,13 +267,9 @@ fn serve(
                         "unsupported audio format",
                     ));
                 }
-                let output_enabled = audio_output_available();
-                if !output_enabled {
-                    eprintln!(
-                        "Audio forwarding off: Windows audio output device is unavailable or busy"
-                    );
-                }
-                if let Err(error) = builder.ensure_audio(sample_rate, channels, output_enabled) {
+                // No availability probe: ffplay tells us itself by exiting, which is reported
+                // once from write_audio while the video keeps running.
+                if let Err(error) = builder.reset_audio(sample_rate, channels) {
                     eprintln!("Audio output unavailable (is ffplay installed?): {error}");
                 }
             }
@@ -567,10 +531,10 @@ impl FfmpegBuilder {
     }
 
     fn start_audio(&mut self, sample_rate: u32, channels: u8) -> std::io::Result<()> {
-        if self.audio.is_some()
-            || !(8_000..=192_000).contains(&sample_rate)
-            || !(1..=2).contains(&channels)
-        {
+        if self.audio.is_some() {
+            return Ok(());
+        }
+        if !(8_000..=192_000).contains(&sample_rate) || !(1..=2).contains(&channels) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "unsupported audio format",
@@ -613,25 +577,29 @@ impl FfmpegBuilder {
         Ok(())
     }
 
-    fn ensure_audio(
-        &mut self,
-        sample_rate: u32,
-        channels: u8,
-        enabled: bool,
-    ) -> std::io::Result<()> {
-        self.stop_audio();
-        if enabled {
-            self.start_audio(sample_rate, channels)?;
-        }
-        Ok(())
+    fn reset_audio(&mut self, sample_rate: u32, channels: u8) -> std::io::Result<()> {
+        self.kill_audio();
+        self.start_audio(sample_rate, channels)
     }
 
     fn write_audio(&mut self, pcm: &[u8]) {
-        if let Some(audio) = self.audio.as_mut() {
-            if let Err(error) = audio.stdin.write_all(pcm).and_then(|_| audio.stdin.flush()) {
-                self.audio.take();
-                eprintln!("Audio output stopped: {error}");
-            }
+        let failed = match self.audio.as_mut() {
+            None => return,
+            Some(audio) => match audio.child.try_wait() {
+                Ok(Some(_)) => true,
+                Err(_) => true,
+                Ok(None) => audio
+                    .stdin
+                    .write_all(pcm)
+                    .and_then(|_| audio.stdin.flush())
+                    .is_err(),
+            },
+        };
+        if failed {
+            self.audio.take();
+            eprintln!(
+                "Audio output stopped: ffplay exited or the Windows playback device is unavailable"
+            );
         }
     }
 
@@ -640,10 +608,6 @@ impl FfmpegBuilder {
             let _ = audio.child.kill();
             let _ = audio.child.wait();
         }
-    }
-
-    fn stop_audio(&mut self) {
-        self.kill_audio();
     }
 }
 
@@ -695,7 +659,6 @@ fn run_window(
     let mut frame_w = 0usize;
     let mut frame_h = 0usize;
     let mut seen = 0u64;
-    let mut displayed = Vec::<u32>::new();
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let next_seq = frame_seq.load(Ordering::Relaxed);
@@ -726,24 +689,10 @@ fn run_window(
         let status = shared.status.lock().unwrap().clone();
         window.set_title(&format!("ViewGo — {status} — port {port} — code {code}"));
 
-        if frame_w > 0 && frame_h > 0 && !pixels.is_empty() {
-            let (window_w, window_h) = window.get_size();
-            let (window_w, window_h) = (window_w.max(1), window_h.max(1));
-            if displayed.len() != window_w * window_h {
-                displayed.resize(window_w * window_h, 0);
-            }
-            displayed.fill(0);
-            let (draw_w, draw_h) = fit_size(frame_w, frame_h, window_w, window_h);
-            let left = (window_w - draw_w) / 2;
-            let top = (window_h - draw_h) / 2;
-            for y in 0..draw_h {
-                for x in 0..draw_w {
-                    let sx = x * window_w / draw_w;
-                    let sy = y * window_h / draw_h;
-                    displayed[(top + y) * window_w + left + x] = pixels[sy * window_w + sx];
-                }
-            }
-            let _ = window.update_with_buffer(&displayed, window_w, window_h);
+        let (window_w, window_h) = window.get_size();
+        let (window_w, window_h) = (window_w.max(1), window_h.max(1));
+        if frame_w > 0 && frame_h > 0 && pixels.len() == window_w * window_h {
+            let _ = window.update_with_buffer(&pixels, window_w, window_h);
         } else {
             let _ = window.update();
         }
@@ -889,7 +838,7 @@ mod tests {
             Instant::now() + CODE_TTL
         };
         Arc::new(Shared {
-            code: Mutex::new(("AB3DE4GHJ".to_string(), expiry)),
+            code: Mutex::new(("AB3D".to_string(), expiry)),
             active: Mutex::new(false),
             attempts: Mutex::new(HashMap::new()),
             seen_randoms: Mutex::new(Vec::new()),

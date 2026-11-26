@@ -17,7 +17,7 @@ pub const PBKDF2_ITER: u32 = 120_000;
 pub const MAX_BODY: usize = 16 * 1024 * 1024;
 pub const MAX_PLAIN: usize = 4096;
 pub const CODE_ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-pub const CODE_LEN: usize = 9;
+pub const CODE_LEN: usize = 4;
 
 pub const STATUS_OK: u8 = 0;
 pub const STATUS_EXPIRED: u8 = 2;
@@ -186,13 +186,13 @@ mod tests {
 
     #[test]
     fn code_normalisation() {
-        let code = "ab3-de4-ghj";
-        assert_eq!(normalize_code("AB3DE4GHJ").as_deref(), Some("AB3DE4GHJ"));
-        assert_eq!(normalize_code(code).as_deref(), Some("AB3DE4GHJ"));
-        assert_eq!(normalize_code("AB3DE4GHO").as_deref(), Some("AB3DE4GH0"));
-        assert_eq!(normalize_code("AB3DE4GHI").as_deref(), Some("AB3DE4GH1"));
-        assert_eq!(normalize_code("too-short"), None);
-        assert_eq!(normalize_code("AB3DE4GH!"), None);
+        let code = "ab3-d";
+        assert_eq!(normalize_code("AB3D").as_deref(), Some("AB3D"));
+        assert_eq!(normalize_code(code).as_deref(), Some("AB3D"));
+        assert_eq!(normalize_code("AB3O").as_deref(), Some("AB30"));
+        assert_eq!(normalize_code("AB3I").as_deref(), Some("AB31"));
+        assert_eq!(normalize_code("AB3"), None);
+        assert_eq!(normalize_code("AB3D!"), None);
     }
 
     #[test]

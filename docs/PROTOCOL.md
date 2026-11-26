@@ -12,7 +12,7 @@ Maximum frame body: 16 MiB. Larger or zero lengths close the connection.
 
 ## Handshake (plaintext)
 
-Both sides know the pairing code shown by the receiver (9 characters, Crockford base32
+Both sides know the pairing code shown by the receiver (4 characters, Crockford base32
 alphabet `0123456789ABCDEFGHJKMNPQRSTVWXYZ`). The code is **never sent**.
 
 `salt` is 16 random bytes from the receiver. `cr` is 16 random bytes from the sender.

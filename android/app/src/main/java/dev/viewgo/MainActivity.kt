@@ -90,7 +90,7 @@ class MainActivity : Activity() {
             adapter = ArrayAdapter(
                 this@MainActivity,
                 android.R.layout.simple_spinner_dropdown_item,
-                listOf("1080p — 12 Mbps", "720p — 6 Mbps"),
+                listOf("1080p — 16 Mbps", "720p — 6 Mbps"),
             )
         }
         shareField = Spinner(this).apply {
@@ -177,8 +177,8 @@ class MainActivity : Activity() {
             return
         }
         if (code == null) {
-            statusLabel.text = "The pairing code has 9 letters or digits."
-            AppLog.line("Pairing code is not 9 letters or digits")
+            statusLabel.text = "The pairing code has 4 letters or digits."
+            AppLog.line("Pairing code is not 4 letters or digits")
             return
         }
         val quality = qualityField.selectedItemPosition
@@ -189,7 +189,7 @@ class MainActivity : Activity() {
             code = code,
             width = if (quality == 0) 1080 else 720,
             height = if (quality == 0) 1920 else 1280,
-            bitrate = if (quality == 0) 12_000_000 else 6_000_000,
+            bitrate = if (quality == 0) 16_000_000 else 6_000_000,
             audio = audio,
         )
         val manager = getSystemService(MediaProjectionManager::class.java)

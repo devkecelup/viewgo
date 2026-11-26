@@ -13,24 +13,24 @@ class ProtocolTest {
         val salt = ByteArray(16) { 0 }
         val clientRandom = ByteArray(16) { 1 }
         val serverRandom = ByteArray(16) { 2 }
-        val key = deriveKey("AB3DE4GHJ", salt, clientRandom, serverRandom)
+        val key = deriveKey("AB3D", salt, clientRandom, serverRandom)
         assertEquals(
-            "1361b2068007b14c0e06acc4cf51ef4059dae4d238b621c0f4f4731cb89a6ad0",
+            "d18e8faac03b548c88a01ec4204ca62e459c72e301b63cf0dbbfa4a20fe19949",
             key.toHex(),
         )
         assertEquals(
-            "1b9ad552d5cdb1934c192c90cdfba76dcb69c9a434bab4332e963e034bd9582d",
+            "f32c964be074bf56da32739fa6f3c0cb62241a85a08dac4eb77dc8820583712d",
             proof(key, salt, clientRandom, serverRandom).toHex(),
         )
     }
 
     @Test
     fun codeNormalisation() {
-        assertEquals("AB3DE4GHJ", normalizeCode("ab3-de4-ghj"))
-        assertEquals("AB3DE4GH0", normalizeCode("AB3DE4GHO"))
-        assertEquals("AB3DE4GH1", normalizeCode("AB3DE4GHL"))
-        assertNull(normalizeCode("too-short"))
-        assertNull(normalizeCode("AB3DE4GH!"))
+        assertEquals("AB3D", normalizeCode("ab3-d"))
+        assertEquals("AB30", normalizeCode("AB3O"))
+        assertEquals("AB31", normalizeCode("AB3L"))
+        assertNull(normalizeCode("AB3"))
+        assertNull(normalizeCode("AB3D!"))
     }
 
     private fun ByteArray.toHex() = joinToString("") { "%02x".format(it) }

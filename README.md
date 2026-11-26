@@ -14,19 +14,20 @@ Read `PRD.md` for scope and `docs/PROTOCOL.md` for the wire format.
 ## What works now
 
 - Automatic laptop discovery on the same Wi-Fi using DNS-SD/mDNS; the phone only needs the
-  temporary 9-character pairing code (120 s, single use, rate limited per device address).
+  temporary 4-character pairing code (120 s, single use, rate limited per device address).
 - AES-256-GCM stream, key derived from the code with PBKDF2; the code itself is never sent.
 - Android `MediaProjection` capture with the required consent dialog and foreground notification.
-- H.264 up to 1080p30 at 12 Mbps or 720p30 at 6 Mbps. The short side follows the quality choice and
+- H.264 up to 1080p30 at 16 Mbps or 720p30 at 6 Mbps. The short side follows the quality choice and
   the long side keeps the phone's native proportions (1080x2400 stays 1080x2400), falling back to
   720p if the encoder or capture surface cannot start.
-- Rotating the phone rebuilds the encoder and virtual display in place, so portrait/landscape
-  rotation keeps the stream running instead of stopping it.
+- Rotating the phone swaps only the encoder surface on the same virtual display (Android allows one
+  `createVirtualDisplay` per projection), so portrait/landscape rotation keeps the session running.
 - Android 14+ can share only one chosen app instead of the whole screen; earlier versions share the
   whole screen.
 - Optional internal media/game audio streams over the encrypted session; enable it on the phone,
   and install `ffplay` on Windows. Android or an individual app may block playback capture.
-- Laptop shows the stream in a small window, with resolution and measured frame rate in the title.
+- Laptop shows the stream in a resizable window (maximize it: the picture gets bigger and reads
+  sharper), with resolution and measured frame rate in the title.
 - Stop from the phone app, the notification, the laptop (Esc / close window), or by revoking capture.
 - Phone log: shown in the app, sent to the laptop over the same encrypted connection (printed as
   `phone: ...`), and shareable with **Share log** when no connection was made.
@@ -92,8 +93,11 @@ cargo run --example send_sim -- 127.0.0.1 47810 <pairing code> sample.h264 1080 
 ## Known limits
 
 - No recording, multi-viewer, touch control, iOS, or cloud relay.
-- Rotation recreates the encoder, which can cause a short pause (a fraction of a second) and a new
-  keyframe; the receiver restarts its decoder and keeps the window.
+- Rotation swaps the encoder and sends a new keyframe, which can cause a short pause (a fraction of
+  a second); the receiver restarts its decoder and keeps the window.
+- Sharpness is limited by the laptop window, not the stream: the capture is the phone's native
+  1080x2400, but a 9:20 phone drawn into a 1920x1080 laptop screen can only reach about 468x1040 px
+  (height-limited). Maximize the receiver window for the biggest, sharpest picture.
 - Games and apps that mark their window as secure (many banking apps and some DRM/game surfaces)
   are captured as black by Android; that is the platform's protection, not a ViewGo bug.
 - Single-app capture requires Android 14+ and the **Share one app** option before opening the
@@ -103,8 +107,10 @@ cargo run --example send_sim -- 127.0.0.1 47810 <pairing code> sample.h264 1080 
 - Software H.264 decode on the laptop through ffmpeg; hardware decode is a later step.
 - Quality adaptation is only the startup fallback to 720p. Bitrate does not change mid-session yet.
 - 1080p is best effort. A 4 GB phone that gets hot or drops frames should use 720p.
-- The pairing code is the only shared secret. Six-digit-style codes were rejected for 9 chars, but
-  anyone who can read the code can pair; do not mirror on an untrusted network.
+- The pairing code is the only shared secret. At 4 characters (~1 million combinations) online
+  guessing stays impractical (120 s expiry, single use, 5 attempts per minute per address), but an
+  attacker already on your Wi-Fi who records the pairing handshake can try every code offline and
+  decrypt that session. Pair only on a network you trust.
 
 ## Layout
 

@@ -148,19 +148,35 @@ class MirrorService : Service() {
     }
 
     private fun beginEncoder(width: Int, height: Int, bitrate: Int): Surface {
-        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-            setInteger(
-                MediaFormat.KEY_COLOR_FORMAT,
-                MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface,
-            )
-            setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
-            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
-            setInteger(MediaFormat.KEY_FRAME_RATE, FPS)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
-        }
+        fun format(profile: Int?): MediaFormat =
+            MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+                setInteger(
+                    MediaFormat.KEY_COLOR_FORMAT,
+                    MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface,
+                )
+                setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
+                setInteger(
+                    MediaFormat.KEY_BITRATE_MODE,
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR,
+                )
+                setInteger(MediaFormat.KEY_FRAME_RATE, FPS)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+                // High profile squeezes more detail per bitrate for screen content; some
+                // encoders reject it, so the plain format below is the fallback.
+                if (profile != null) setInteger(MediaFormat.KEY_PROFILE, profile)
+            }
         val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         try {
-            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            try {
+                codec.configure(
+                    format(MediaCodecInfo.CodecProfileLevel.AVCProfileHigh),
+                    null,
+                    null,
+                    MediaCodec.CONFIGURE_FLAG_ENCODE,
+                )
+            } catch (rejected: Exception) {
+                codec.configure(format(null), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            }
             val input = codec.createInputSurface()
             codec.start()
             // Ask for an IDR straight away so a rebuilt encoder does not leave the receiver blank.
@@ -228,11 +244,16 @@ class MirrorService : Service() {
                     orientation = nextOrientation
                     val size = captureSize(maxWidth, maxHeight)
                     AppLog.line("Phone rotated; rebuilding the encoder for ${size.first}×${size.second}")
-                    opened = rebuild(projection, opened, size.first, size.second, bitrate)
-                    info = MediaCodec.BufferInfo()
-                    csd = runCatching { readCsd(opened.codec.outputFormat) }.getOrNull()
-                    sendVideoConfig(session, opened.width, opened.height)
-                    updateNotification("Mirroring ${opened.width}×${opened.height}")
+                    try {
+                        opened = rebuild(opened, size.first, size.second, bitrate)
+                        info = MediaCodec.BufferInfo()
+                        csd = runCatching { readCsd(opened.codec.outputFormat) }.getOrNull()
+                        sendVideoConfig(session, opened.width, opened.height)
+                        updateNotification("Mirroring ${opened.width}×${opened.height}")
+                    } catch (error: Throwable) {
+                        // Keep the running session instead of dropping it on a failed swap.
+                        AppLog.line("Rotation handling failed: ${error.message ?: error.javaClass.simpleName}")
+                    }
                     continue
                 }
 
@@ -287,23 +308,38 @@ class MirrorService : Service() {
         }
     }
 
-    /** MediaCodec dimensions are fixed once started, so rotation recreates encoder and display. */
+    /**
+     * MediaCodec dimensions are fixed once started, but Android only allows one
+     * createVirtualDisplay() per MediaProjection: the display itself is kept and only its
+     * surface is swapped onto the new encoder, then resized to the new orientation.
+     */
     private fun rebuild(
-        projection: MediaProjection,
         old: Opened,
         width: Int,
         height: Int,
         bitrate: Int,
     ): Opened {
+        val oldSurface = encoderSurface
+        val surface = beginEncoder(width, height, bitrate)
+        val codec = encoder ?: throw IOException("Encoder did not start")
+        try {
+            old.display.resize(width, height, resources.configuration.densityDpi)
+            old.display.setSurface(surface)
+        } catch (error: Throwable) {
+            runCatching { codec.stop() }
+            runCatching { codec.release() }
+            runCatching { surface.release() }
+            // Restore the fields to the encoder that is still feeding the display.
+            encoder = old.codec
+            encoderSurface = oldSurface
+            throw error
+        }
         runCatching { old.codec.signalEndOfInputStream() }
         runCatching { old.codec.stop() }
         runCatching { old.codec.release() }
-        runCatching { old.display.release() }
-        if (encoder === old.codec) encoder = null
-        runCatching { encoderSurface?.release() }
-        encoderSurface = null
-        virtualDisplay = null
-        return open(projection, width, height, bitrate)
+        runCatching { oldSurface?.release() }
+        virtualDisplay = old.display
+        return Opened(old.display, codec, width, height)
     }
 
     private fun startAudioThread(session: Link, record: AudioRecord?): Thread? = record?.let {

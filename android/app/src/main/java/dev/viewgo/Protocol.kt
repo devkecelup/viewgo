@@ -50,7 +50,7 @@ fun normalizeCode(input: String): String? {
         if (ch !in "0123456789ABCDEFGHJKMNPQRSTVWXYZ") return null
         out.append(ch)
     }
-    return if (out.length == 9) out.toString() else null
+    return if (out.length == 4) out.toString() else null
 }
 
 internal fun deriveKey(code: String, salt: ByteArray, clientRandom: ByteArray, serverRandom: ByteArray): ByteArray {
