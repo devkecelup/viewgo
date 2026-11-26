@@ -30,6 +30,7 @@ object Proto {
     const val T_STOP = 0x07
 
     const val STATUS_OK = 0
+    const val STATUS_BAD_CODE = 1
     const val STATUS_EXPIRED = 2
     const val STATUS_RATE_LIMITED = 3
     const val STATUS_BUSY = 4
@@ -95,6 +96,7 @@ class Link(private val socket: Socket, private val code: String) {
         }
         when (challenge[5].toInt() and 0xFF) {
             Proto.STATUS_OK -> Unit
+            Proto.STATUS_BAD_CODE -> throw IOException("Wrong pairing code shown on the laptop.")
             Proto.STATUS_EXPIRED -> throw IOException("The code expired. Use the new code shown on the laptop.")
             Proto.STATUS_RATE_LIMITED -> throw IOException("Too many attempts. Wait a minute, then try again.")
             Proto.STATUS_BUSY -> throw IOException("The laptop is already mirroring another phone.")
@@ -111,7 +113,18 @@ class Link(private val socket: Socket, private val code: String) {
         System.arraycopy(proof(key, salt, clientRandom, serverRandom), 0, auth, 5, 32)
         writePlain(auth)
 
-        val ok = openRecord() ?: throw IOException("The laptop could not prove the session key.")
+        // The laptop replies with either an encrypted AUTH_OK or a plaintext status rejection;
+        // without the latter the phone can only ever report a bare EOFException.
+        val reply = readPlain()
+        if (reply.size >= 6 && (0 until 4).all { reply[it] == Proto.MAGIC[it] } &&
+            reply[4].toInt() == Proto.VERSION
+        ) {
+            when (reply[5].toInt() and 0xFF) {
+                Proto.STATUS_BAD_CODE -> throw IOException("Wrong pairing code shown on the laptop.")
+                else -> throw IOException("The laptop rejected the connection.")
+            }
+        }
+        val ok = openRecord(reply) ?: throw IOException("The laptop could not prove the session key.")
         if (ok.size != 5 || ok[0].toInt() != 0x10) throw IOException("The laptop could not prove the session key.")
     }
 
@@ -145,17 +158,14 @@ class Link(private val socket: Socket, private val code: String) {
         return ByteArray(length).also { input.readFully(it) }
     }
 
-    private fun openRecord(): ByteArray? {
-        val length = input.readInt()
-        if (length <= 0 || length > Proto.MAX_BODY) throw IOException("Invalid record length.")
-        val record = ByteArray(length).also { input.readFully(it) }
-        if (record.size < 28 || record[0].toInt() != 1) return null
+    private fun openRecord(body: ByteArray): ByteArray? {
+        if (body.size < 28 || body[0].toInt() != 1) return null
         var counter = 0L
-        for (i in 0 until 8) counter = (counter shl 8) or (record[4 + i].toLong() and 0xFF)
+        for (i in 0 until 8) counter = (counter shl 8) or (body[4 + i].toLong() and 0xFF)
         if (counter != recvCounter) return null
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, record.copyOfRange(0, 12)))
-        val plain = runCatching { cipher.doFinal(record, 12, record.size - 12) }.getOrNull() ?: return null
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, body.copyOfRange(0, 12)))
+        val plain = runCatching { cipher.doFinal(body, 12, body.size - 12) }.getOrNull() ?: return null
         recvCounter++
         return plain
     }

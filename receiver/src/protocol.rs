@@ -20,6 +20,7 @@ pub const CODE_ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 pub const CODE_LEN: usize = 4;
 
 pub const STATUS_OK: u8 = 0;
+pub const STATUS_BAD_CODE: u8 = 1;
 pub const STATUS_EXPIRED: u8 = 2;
 pub const STATUS_RATE_LIMITED: u8 = 3;
 pub const STATUS_BUSY: u8 = 4;

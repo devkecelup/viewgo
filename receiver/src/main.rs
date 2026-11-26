@@ -79,6 +79,30 @@ struct AudioPlayer {
     stdin: BufWriter<std::process::ChildStdin>,
 }
 
+/// 44-byte PCM WAV header written once before the first PCM frame: it carries the sample rate and
+/// channel count that raw s16le over a pipe cannot express. Chunk sizes are 0xFFFFFFFF because the
+/// stream has no length; ffplay reads until the pipe closes.
+fn wav_header(sample_rate: u32, channels: u8) -> [u8; 44] {
+    const BITS: u16 = 16;
+    let block_align = channels as u16 * (BITS / 8);
+    let byte_rate = sample_rate * block_align as u32;
+    let mut header = [0u8; 44];
+    header[0..4].copy_from_slice(b"RIFF");
+    header[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+    header[8..12].copy_from_slice(b"WAVE");
+    header[12..16].copy_from_slice(b"fmt ");
+    header[16..20].copy_from_slice(&16u32.to_le_bytes());
+    header[20..22].copy_from_slice(&1u16.to_le_bytes());
+    header[22] = channels;
+    header[24..28].copy_from_slice(&sample_rate.to_le_bytes());
+    header[28..32].copy_from_slice(&byte_rate.to_le_bytes());
+    header[32..34].copy_from_slice(&block_align.to_le_bytes());
+    header[34..36].copy_from_slice(&BITS.to_le_bytes());
+    header[36..40].copy_from_slice(b"data");
+    header[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+    header
+}
+
 fn main() {
     let port = env::args()
         .nth(1)
@@ -129,11 +153,22 @@ fn accept_loop(
     frame_seq: Arc<AtomicU64>,
 ) {
     for stream in listener.incoming() {
-        let stream = match stream {
+        let mut stream = match stream {
             Ok(stream) => stream,
             Err(_) => continue,
         };
         if *shared.active.lock().unwrap() {
+            // Reply with a status instead of closing silently: without it the phone can only
+            // report an EOFException with no reason.
+            let mut reject = Vec::with_capacity(38);
+            reject.extend_from_slice(MAGIC);
+            reject.push(VERSION);
+            reject.push(STATUS_BUSY);
+            reject.extend_from_slice(&random_bytes::<16>());
+            reject.extend_from_slice(&random_bytes::<16>());
+            let _ = write_frame(&mut stream, &reject);
+            let _ = stream.flush();
+            println!("Rejected pairing (laptop already has a session)");
             drop(stream);
             continue;
         }
@@ -391,6 +426,16 @@ fn handshake(
         ));
     }
     if !proof_matches(&expected, &auth[5..37]) {
+        // Tell the phone why instead of closing (it would only ever see EOF).
+        let mut reject = Vec::with_capacity(38);
+        reject.extend_from_slice(MAGIC);
+        reject.push(VERSION);
+        reject.push(STATUS_BAD_CODE);
+        reject.extend_from_slice(&salt);
+        reject.extend_from_slice(&server_random);
+        let _ = write_frame(stream, &reject);
+        let _ = stream.flush();
+        println!("Rejected pairing from {peer} (wrong code)");
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "wrong code",
@@ -443,6 +488,10 @@ impl FfmpegBuilder {
         let ffmpeg = env::var("FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string());
         // shortcut: H.264 decoding runs in software through ffmpeg; move to Media Foundation
         // (D3D11VA) if the target laptop cannot decode 1080p in real time.
+        // scale=WxH pins the rawvideo output to exactly the dimensions the reader will consume:
+        // an encoder that rounds a non-macroblock-aligned size (e.g. 1080 -> 1088) would otherwise
+        // shift every frame and garble the picture.
+        let out_size = format!("scale={}:{}", width, height);
         let mut child = Command::new(ffmpeg)
             .args([
                 "-hide_banner",
@@ -463,6 +512,8 @@ impl FfmpegBuilder {
                 "-dn",
                 "-fps_mode",
                 "passthrough",
+                "-vf",
+                &out_size,
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
@@ -541,39 +592,40 @@ impl FfmpegBuilder {
             ));
         }
         let ffplay = env::var("FFPLAY").unwrap_or_else(|_| "ffplay".to_string());
-        let rate = sample_rate.to_string();
-        let channel_count = channels.to_string();
         let mut child = Command::new(ffplay)
-            .args(["-nodisp", "-loglevel", "error"])
             .args([
-                "-f",
-                "s16le",
-                "-ar",
-                &rate,
-                "-ac",
-                &channel_count,
-                "-blocksize",
-                "4096",
+                // ffplay takes the input as a positional argument: it has no `-i`, and `-ac` /
+                // `-channel_layout` are not valid input options in the ffplay builds on PATH.
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "error",
                 "-fflags",
                 "nobuffer",
-                "-flags",
-                "low_delay",
-                "-i",
+                "-f",
+                "wav",
                 "pipe:0",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()?;
-        self.audio = Some(AudioPlayer {
-            stdin: BufWriter::with_capacity(
-                16 * 1024,
-                child.stdin.take().ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "ffplay stdin unavailable")
-                })?,
-            ),
-            child,
-        });
+        let mut stdin = BufWriter::with_capacity(
+            16 * 1024,
+            child.stdin.take().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "ffplay stdin unavailable")
+            })?,
+        );
+        // The header is what tells ffplay the sample rate and channel count; raw s16le over a
+        // pipe would be read as mono. Sizes stay 0xFFFFFFFF because the stream has no length.
+        if let Err(error) = stdin
+            .write_all(&wav_header(sample_rate, channels))
+            .and_then(|_| stdin.flush())
+        {
+            let _ = child.kill();
+            return Err(error);
+        }
+        self.audio = Some(AudioPlayer { stdin, child });
         Ok(())
     }
 
@@ -659,29 +711,42 @@ fn run_window(
     let mut frame_w = 0usize;
     let mut frame_h = 0usize;
     let mut seen = 0u64;
+    // Keep the newest decoded frame so the picture is re-scaled when the window is resized,
+    // not only when a new frame happens to arrive (otherwise a maximize shows stale content).
+    let mut last: Option<(Vec<u8>, usize, usize)> = None;
+    let mut last_size = (0usize, 0usize);
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let next_seq = frame_seq.load(Ordering::Relaxed);
+        let mut fresh = false;
         if next_seq != seen {
             let mut guard = latest.lock().unwrap();
             if let Some(frame) = guard.frame.take() {
                 seen = guard.seq;
                 frame_w = guard.width;
                 frame_h = guard.height;
-                drop(guard);
+                fresh = true;
+                if let Some((old, _, _)) = last.replace((frame, frame_w, frame_h)) {
+                    if let Ok(mut pool) = spares.lock() {
+                        if pool.len() < 3 {
+                            pool.push(old);
+                        }
+                    }
+                }
+            }
+        }
 
-                let (window_w, window_h) = window.get_size();
-                let (window_w, window_h) = (window_w.max(1), window_h.max(1));
+        let (window_w, window_h) = window.get_size();
+        let (window_w, window_h) = (window_w.max(1), window_h.max(1));
+        let resized = last_size != (window_w, window_h);
+        if (fresh || resized) && frame_w > 0 && frame_h > 0 {
+            if let Some((frame, w, h)) = last.as_ref() {
                 if pixels.len() != window_w * window_h {
                     pixels.resize(window_w * window_h, 0);
                 }
                 pixels.fill(0x000000);
-                scale_fit_bgra(&frame, frame_w, frame_h, &mut pixels, window_w, window_h);
-                if let Ok(mut pool) = spares.lock() {
-                    if pool.len() < 3 {
-                        pool.push(frame);
-                    }
-                }
+                scale_fit_bgra(frame, *w, *h, &mut pixels, window_w, window_h);
+                last_size = (window_w, window_h);
             }
         }
 
@@ -689,8 +754,6 @@ fn run_window(
         let status = shared.status.lock().unwrap().clone();
         window.set_title(&format!("ViewGo — {status} — port {port} — code {code}"));
 
-        let (window_w, window_h) = window.get_size();
-        let (window_w, window_h) = (window_w.max(1), window_h.max(1));
         if frame_w > 0 && frame_h > 0 && pixels.len() == window_w * window_h {
             let _ = window.update_with_buffer(&pixels, window_w, window_h);
         } else {

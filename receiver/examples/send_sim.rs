@@ -76,9 +76,13 @@ fn main() -> std::io::Result<()> {
 
     let mut cipher = Cipher::new(key, 0);
     let mut writer = stream;
-    let ok = cipher
-        .open(&read_frame(&mut writer, MAX_PLAIN)?)
-        .expect("encrypted auth reply");
+    let reply = read_frame(&mut writer, MAX_PLAIN)?;
+    // The receiver rejects a wrong code with a plaintext status instead of an encrypted AUTH_OK.
+    if reply.len() >= 6 && &reply[0..4] == MAGIC && reply[4] == VERSION {
+        eprintln!("receiver rejected the pairing (status {})", reply[5]);
+        std::process::exit(1);
+    }
+    let ok = cipher.open(&reply).expect("encrypted auth reply");
     assert_eq!(ok[0], T_AUTH_OK, "receiver did not acknowledge the session");
 
     let log = b"sim sender online";

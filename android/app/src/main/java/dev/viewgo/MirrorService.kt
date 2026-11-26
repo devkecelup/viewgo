@@ -102,6 +102,10 @@ class MirrorService : Service() {
         worker = Thread {
             try {
                 val connection = Socket()
+                // Bound the in-flight video data so a slow link drops frames (the encoder stalls)
+                // instead of queueing them and growing the mirror delay. 128 KB ≈ 64 ms at 16 Mbps
+                // and is far more than a LAN needs for full throughput.
+                runCatching { connection.sendBufferSize = 128 * 1024 }
                 connection.connect(InetSocketAddress(host, port), 8000)
                 connection.tcpNoDelay = true
                 connection.soTimeout = 20_000
@@ -161,6 +165,11 @@ class MirrorService : Service() {
                 )
                 setInteger(MediaFormat.KEY_FRAME_RATE, FPS)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+                // Screen mirroring needs the lowest possible delay, not compression efficiency:
+                // priority 0 tells the encoder to trade quality for latency, and zero B-frames
+                // removes the reorder delay (High profile would otherwise allow them).
+                setInteger(MediaFormat.KEY_PRIORITY, 0)
+                setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
                 // High profile squeezes more detail per bitrate for screen content; some
                 // encoders reject it, so the plain format below is the fallback.
                 if (profile != null) setInteger(MediaFormat.KEY_PROFILE, profile)
