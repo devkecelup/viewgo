@@ -1,0 +1,21 @@
+# Local tooling and state
+.opencode/
+.taste-skill/
+
+# Build output
+target/
+build/
+.gradle/
+dist/
+local.properties
+*.apk
+*.aab
+*.exe
+*.msi
+
+# IDE and OS files
+.idea/
+.vscode/
+*.iml
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,14 @@
+[package]
+name = "viewgo-receiver"
+version = "0.1.0"
+edition = "2021"
+description = "Windows receiver for ViewGo Android screen mirroring"
+license = "MIT"
+
+[dependencies]
+aes-gcm = "0.10"
+hmac = "0.12"
+minifb = "0.27"
+pbkdf2 = { version = "0.12", features = ["simple"] }
+rand = "0.8"
+sha2 = "0.10"
