@@ -1,6 +1,8 @@
 # ViewGo protocol v1
 
 Local-network screen mirroring: Android sender, Windows receiver. TCP, default port **47810**.
+The laptop publishes `_viewgo._tcp.local.` using mDNS/DNS-SD so the Android app can find it without
+typing an IP address. The pairing code is still required and is not itself a network locator.
 This document is the single source of truth for both implementations; change it before changing either side.
 
 ## Framing
@@ -75,11 +77,14 @@ a counter it has already seen for a direction.
                    1 = request keyframe (no args)
                    2 = set bitrate: u32 bits per second
 0x04  LOG          UTF-8 text from the phone, printed by the receiver (max 8 KiB)
-0x05  STOP         no args
+0x05  AUDIO_CONFIG u32 sample rate Hz, u8 channels (PCM signed 16-bit little endian)
+0x06  AUDIO_FRAME  PCM signed 16-bit little endian samples
+0x07  STOP         no args
 ```
 
 Annex-B is required: NAL units separated by `00 00 00 01` or `00 00 01`. Keyframe frames include
-SPS and PPS before the IDR slice.
+SPS and PPS before the IDR slice. Audio capture is Android playback-capture PCM; apps that deny
+capture (including protected/DRM playback) produce no audio by platform policy.
 
 ## Session rules
 

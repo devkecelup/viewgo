@@ -25,7 +25,9 @@ object Proto {
     const val T_VIDEO_FRAME = 0x02
     const val T_CONTROL = 0x03
     const val T_LOG = 0x04
-    const val T_STOP = 0x05
+    const val T_AUDIO_CONFIG = 0x05
+    const val T_AUDIO_FRAME = 0x06
+    const val T_STOP = 0x07
 
     const val STATUS_OK = 0
     const val STATUS_EXPIRED = 2
@@ -126,6 +128,8 @@ class Link(private val socket: Socket, private val code: String) {
     }
 
     fun sendStop() = runCatching { send(Proto.T_STOP, ByteArray(0)) }
+
+    fun sendConfig(type: Int, body: ByteArray) = send(type, body)
 
     fun close() = runCatching { socket.close() }
 

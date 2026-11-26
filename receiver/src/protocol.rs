@@ -29,7 +29,9 @@ pub const T_VIDEO_CONFIG: u8 = 0x01;
 pub const T_VIDEO_FRAME: u8 = 0x02;
 pub const T_CONTROL: u8 = 0x03;
 pub const T_LOG: u8 = 0x04;
-pub const T_STOP: u8 = 0x05;
+pub const T_AUDIO_CONFIG: u8 = 0x05;
+pub const T_AUDIO_FRAME: u8 = 0x06;
+pub const T_STOP: u8 = 0x07;
 
 pub fn new_code() -> String {
     let mut rng = rand::thread_rng();
@@ -209,8 +211,14 @@ mod tests {
         let a = derive_key("AB3DE4GHJ", &salt, &cr, &sr);
         let b = derive_key("AB3DE4GHJ", &salt, &cr, &sr);
         assert_eq!(a, b);
-        assert!(proof_matches(&proof(&a, &salt, &cr, &sr), &proof(&b, &salt, &cr, &sr)));
-        assert!(!proof_matches(&proof(&a, &salt, &cr, &sr), &proof(&b, &salt, &cr, &[0u8; 16])));
+        assert!(proof_matches(
+            &proof(&a, &salt, &cr, &sr),
+            &proof(&b, &salt, &cr, &sr)
+        ));
+        assert!(!proof_matches(
+            &proof(&a, &salt, &cr, &sr),
+            &proof(&b, &salt, &cr, &[0u8; 16])
+        ));
     }
 
     #[test]

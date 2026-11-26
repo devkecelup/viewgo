@@ -9,6 +9,11 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.graphics.Point
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioPlaybackCaptureConfiguration
+import android.media.AudioRecord
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
@@ -53,6 +58,8 @@ class MirrorService : Service() {
     private var encoder: MediaCodec? = null
     private var encoderSurface: Surface? = null
     private var virtualDisplay: VirtualDisplay? = null
+    @Volatile private var audioRecord: AudioRecord? = null
+    @Volatile private var rotationError: String? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -80,9 +87,9 @@ class MirrorService : Service() {
         }
 
         val port = intent.getIntExtra(EXTRA_PORT, 47810)
-        var width = intent.getIntExtra(EXTRA_WIDTH, 1080)
-        var height = intent.getIntExtra(EXTRA_HEIGHT, 1920)
-        var bitrate = intent.getIntExtra(EXTRA_BITRATE, 6_000_000)
+        val maxWidth = intent.getIntExtra(EXTRA_WIDTH, 1080)
+        val maxHeight = intent.getIntExtra(EXTRA_HEIGHT, 1920)
+        val bitrate = intent.getIntExtra(EXTRA_BITRATE, 10_000_000)
 
         startForegroundCompat("Connecting to $host…")
         running = true
@@ -114,38 +121,64 @@ class MirrorService : Service() {
                     }
                 }, Handler(Looper.getMainLooper()))
 
-                try {
-                    encoderSurface = beginEncoder(width, height, bitrate)
+                val size = captureSize(maxWidth, maxHeight)
+                var width = size.first
+                var height = size.second
+                var activeBitrate = bitrate
+                var encoderSize = try {
+                    beginEncoder(width, height, bitrate)
+                    width to height
                 } catch (first: Exception) {
-                    if (width <= 720) throw first
-                    // 1080p is best effort: fall back once to 720p before giving up.
-                    width = 720
-                    height = 1280
-                    bitrate = 3_000_000
-                    encoderSurface = beginEncoder(width, height, bitrate)
+                    if (maxWidth <= 720) throw first
+                    AppLog.line("1080 encoder unavailable; retrying at 720p")
+                    val fallback = captureSize(720, 1280)
+                    width = fallback.first
+                    height = fallback.second
+                    activeBitrate = 5_000_000
+                    beginEncoder(fallback.first, fallback.second, activeBitrate)
+                    fallback.first to fallback.second
                 }
 
-                val config = ByteArray(5)
-                putShort(config, 0, width)
-                putShort(config, 2, height)
-                config[4] = FPS.toByte()
-                session.send(Proto.T_VIDEO_CONFIG, config)
-
-                // shortcut: fixed portrait capture, no reconfiguration on rotation; landscape apps
-                // are letterboxed inside the stream. Recreate the encoder when rotation matters.
-                virtualDisplay = capture.createVirtualDisplay(
-                    "viewgo",
-                    width,
-                    height,
-                    resources.displayMetrics.densityDpi,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    encoderSurface,
-                    null,
-                    null,
-                )
+                val captureDisplay = try {
+                    capture.createVirtualDisplay(
+                        "viewgo",
+                        width,
+                        height,
+                        resources.configuration.densityDpi,
+                        DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                        encoderSurface,
+                        null,
+                        null,
+                    ) ?: throw IOException("Android could not create the capture display")
+                } catch (first: Exception) {
+                    if (encoderSize.first <= 720) throw first
+                    runCatching { encoder?.stop() }
+                    runCatching { encoder?.release() }
+                    encoder = null
+                    runCatching { encoderSurface?.release() }
+                    encoderSurface = null
+                    val fallback = captureSize(720, 1280)
+                    activeBitrate = 5_000_000
+                    val surface = beginEncoder(fallback.first, fallback.second, activeBitrate)
+                    encoderSurface = surface
+                    width = fallback.first
+                    height = fallback.second
+                    encoderSize = width to height
+                    capture.createVirtualDisplay(
+                        "viewgo", width, height, resources.configuration.densityDpi,
+                        DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, surface, null, null,
+                    ) ?: throw IOException("Android could not create the 720p capture display")
+                }
+                virtualDisplay = captureDisplay
+                val configWidth = encoderSize.first
+                val configHeight = encoderSize.second
+                val initialSize = encoderSize
                 updateNotification("Mirroring $width×$height")
-                AppLog.line("Mirroring $width×${height} at ${bitrate / 1_000_000} Mbps")
-                drainEncoder(session)
+                AppLog.line("Mirroring ${initialSize.first}×${initialSize.second} at ${activeBitrate / 1_000_000} Mbps")
+
+                val audio = startAudioCapture(capture, session)
+                sendVideoConfig(session, initialSize.first, initialSize.second)
+                drainEncoder(session, captureDisplay, maxWidth, maxHeight, configWidth, configHeight, activeBitrate, audio)
             } catch (error: Throwable) {
                 AppLog.line("Stopped: ${error.message ?: error.javaClass.simpleName}")
                 if (running) stopMirroring("Stopped: ${error.message ?: error.javaClass.simpleName}")
@@ -179,19 +212,65 @@ class MirrorService : Service() {
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
         }
         val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-        codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        val input = codec.createInputSurface()
-        codec.start()
-        encoder = codec
-        return input
+        try {
+            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            val input = codec.createInputSurface()
+            codec.start()
+            encoder = codec
+            encoderSurface = input
+            return input
+        } catch (error: Exception) {
+            runCatching { codec.stop() }
+            runCatching { codec.release() }
+            throw error
+        }
     }
 
-    private fun drainEncoder(session: Link) {
+    private fun drainEncoder(
+        session: Link,
+        captureDisplay: VirtualDisplay,
+        maxWidth: Int,
+        maxHeight: Int,
+        configWidth: Int,
+        configHeight: Int,
+        bitrate: Int,
+        audio: AudioRecord?,
+    ) {
         val codec = encoder ?: return
         val info = MediaCodec.BufferInfo()
         var csd: ByteArray? = null
+        val audioThread = audio?.let { record ->
+            Thread {
+                val chunk = ByteArray(1_920) // 20 ms PCM chunks keep A/V interleave bounded.
+                while (running) {
+                    val count = record.read(chunk, 0, chunk.size, AudioRecord.READ_BLOCKING)
+                    if (count > 0) {
+                        try {
+                            session.send(Proto.T_AUDIO_FRAME, chunk.copyOf(count))
+                        } catch (error: Exception) {
+                            AppLog.line("Audio stream stopped: ${error.message}")
+                            break
+                        }
+                    }
+                }
+            }.also { it.start() }
+        }
 
+        var orientation = currentRotation()
         while (running) {
+            val nextOrientation = currentRotation()
+            if (nextOrientation != orientation) {
+                orientation = nextOrientation
+                val size = captureSize(maxWidth, maxHeight)
+                val isLandscape = orientation == Surface.ROTATION_90 || orientation == Surface.ROTATION_270
+                if (isLandscape != (configWidth > configHeight)) {
+                    rotationError = "Orientation changed; reconnect to restart the encoder in ${size.first}×${size.second}"
+                    stopMirroring(rotationError!!)
+                    break
+                }
+                captureDisplay.resize(size.first, size.second, resources.configuration.densityDpi)
+                AppLog.line("Phone orientation updated: ${size.first}×${size.second}")
+            }
             val index = codec.dequeueOutputBuffer(info, 10_000)
             if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 csd = readCsd(codec.outputFormat)
@@ -214,7 +293,70 @@ class MirrorService : Service() {
                 codec.releaseOutputBuffer(index, false)
             }
         }
-        runCatching { codec.signalEndOfInputStream() }
+        audioThread?.interrupt()
+        runCatching { audio?.stop() }
+        runCatching { audio?.release() }
+        if (rotationError == null) runCatching { codec.signalEndOfInputStream() }
+    }
+
+    private fun captureSize(maxWidth: Int, maxHeight: Int): Pair<Int, Int> {
+        @Suppress("DEPRECATION")
+        val display = (getSystemService(WINDOW_SERVICE) as android.view.WindowManager).defaultDisplay
+        val point = Point()
+        display.getRealSize(point)
+        val rawW = point.x.coerceAtLeast(1)
+        val rawH = point.y.coerceAtLeast(1)
+        val rawLong = maxOf(rawW, rawH)
+        val rawShort = minOf(rawW, rawH)
+        val targetLong = maxOf(maxWidth, maxHeight)
+        val targetShort = minOf(maxWidth, maxHeight)
+        val scale = minOf(1f, targetLong.toFloat() / rawLong, targetShort.toFloat() / rawShort)
+        var w = (rawW * scale).toInt().coerceAtLeast(2)
+        var h = (rawH * scale).toInt().coerceAtLeast(2)
+        w -= w % 2
+        h -= h % 2
+        return w to h
+    }
+
+    @Suppress("DEPRECATION")
+    private fun currentRotation(): Int =
+        (getSystemService(WINDOW_SERVICE) as android.view.WindowManager).defaultDisplay.rotation
+
+    private fun sendVideoConfig(session: Link, width: Int, height: Int) {
+        session.send(Proto.T_VIDEO_CONFIG, ByteArray(5).apply {
+            putShort(this, 0, width)
+            putShort(this, 2, height)
+            this[4] = FPS.toByte()
+        })
+    }
+
+    private fun startAudioCapture(projection: MediaProjection, session: Link): AudioRecord? = try {
+        val config = AudioPlaybackCaptureConfiguration.Builder(projection)
+            .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+            .addMatchingUsage(AudioAttributes.USAGE_GAME)
+            .build()
+        val format = AudioFormat.Builder()
+            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+            .setSampleRate(48_000)
+            .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
+            .build()
+        val record = AudioRecord.Builder()
+            .setAudioFormat(format)
+            .setAudioPlaybackCaptureConfig(config)
+            .setBufferSizeInBytes(48_000 * 2 * 2 / 5)
+            .build()
+        if (record.state != AudioRecord.STATE_INITIALIZED) {
+            record.release()
+            throw IOException("Android playback capture could not initialize")
+        }
+        audioRecord = record
+        session.send(Proto.T_AUDIO_CONFIG, byteArrayOf(0, 0, 0xBB.toByte(), 0x80.toByte(), 2))
+        record.startRecording()
+        AppLog.line("Internal playback audio capture started (some apps block capture)")
+        record
+    } catch (error: Exception) {
+        AppLog.line("Internal audio unavailable: ${error.message ?: error.javaClass.simpleName}")
+        null
     }
 
     private fun readCsd(format: MediaFormat): ByteArray? {
@@ -267,6 +409,8 @@ class MirrorService : Service() {
         running = false
         AppLog.line(reason)
         updateNotification(reason)
+        if (rotationError == null) runCatching { encoder?.signalEndOfInputStream() }
+        runCatching { audioRecord?.stop() }
         runCatching { link?.sendStop() }
         runCatching { link?.close() }
         runCatching { socket?.close() }
@@ -278,6 +422,10 @@ class MirrorService : Service() {
     private fun releaseAll() {
         runCatching { virtualDisplay?.release() }
         virtualDisplay = null
+        rotationError = null
+        runCatching { audioRecord?.stop() }
+        runCatching { audioRecord?.release() }
+        audioRecord = null
         runCatching { encoder?.stop() }
         runCatching { encoder?.release() }
         encoder = null

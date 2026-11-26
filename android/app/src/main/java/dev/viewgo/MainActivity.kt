@@ -4,6 +4,8 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
@@ -20,10 +22,10 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
+import android.media.projection.MediaProjectionConfig
 
 class MainActivity : Activity() {
 
-    private lateinit var hostField: EditText
     private lateinit var codeField: EditText
     private lateinit var qualityField: Spinner
     private lateinit var statusLabel: TextView
@@ -61,15 +63,18 @@ class MainActivity : Activity() {
             textSize = 28f
         }
         val intro = TextView(this).apply {
-            text = "Start mirroring on the laptop, then type the pairing code it shows. " +
+            text = "Start the receiver on your laptop, tap Find laptop, then enter its code. " +
                 "Both devices must be on the same Wi-Fi."
             textSize = 15f
         }
+        val audioHint = TextView(this).apply {
+            text = "Audio is best effort: Android and some protected/DRM apps block capture."
+            textSize = 13f
+        }
 
-        hostField = EditText(this).apply {
-            hint = "Laptop address, e.g. 192.168.1.10"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-            setSingleLine()
+        val discover = Button(this).apply {
+            text = "Find laptop"
+            setOnClickListener { discoverReceiver() }
         }
         codeField = EditText(this).apply {
             hint = "Pairing code"
@@ -80,7 +85,7 @@ class MainActivity : Activity() {
             adapter = ArrayAdapter(
                 this@MainActivity,
                 android.R.layout.simple_spinner_dropdown_item,
-                listOf("1080p — 6 Mbps", "720p — 3 Mbps"),
+                listOf("1080p — 10 Mbps", "720p — 5 Mbps"),
             )
         }
 
@@ -117,7 +122,7 @@ class MainActivity : Activity() {
             }
         }
 
-        listOf(title, intro, hostField, codeField, qualityField, connect, stop, statusLabel).forEach {
+        listOf(title, intro, audioHint, discover, codeField, qualityField, connect, stop, statusLabel).forEach {
             root.addView(it, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
         root.addView(TextView(this).apply {
@@ -141,11 +146,11 @@ class MainActivity : Activity() {
     }
 
     private fun requestCapture() {
-        val host = hostField.text.toString().trim().removePrefix("http://").removeSuffix("/")
+        val host = selectedHost
         val code = normalizeCode(codeField.text.toString())
-        if (host.isEmpty()) {
-            statusLabel.text = "Enter the laptop address first."
-            AppLog.line("No laptop address entered")
+        if (host == null) {
+            statusLabel.text = "Tap Find laptop first."
+            AppLog.line("No receiver selected")
             return
         }
         if (code == null) {
@@ -156,14 +161,20 @@ class MainActivity : Activity() {
         val quality = qualityField.selectedItemPosition
         pending = Pending(
             host = host,
-            port = 47810,
+            port = selectedPort,
             code = code,
             width = if (quality == 0) 1080 else 720,
             height = if (quality == 0) 1920 else 1280,
-            bitrate = if (quality == 0) 6_000_000 else 3_000_000,
+            bitrate = if (quality == 0) 10_000_000 else 5_000_000,
         )
         val manager = getSystemService(MediaProjectionManager::class.java)
-        startActivityForResult(manager.createScreenCaptureIntent(), REQUEST_CAPTURE)
+        AppLog.line("Requesting screen and playback capture permission")
+        val captureIntent = if (Build.VERSION.SDK_INT >= 34) {
+            manager.createScreenCaptureIntent(MediaProjectionConfig.createConfigForDefaultDisplay())
+        } else {
+            manager.createScreenCaptureIntent()
+        }
+        startActivityForResult(captureIntent, REQUEST_CAPTURE)
     }
 
     @Deprecated("Plain Activity result API keeps the MVP free of AndroidX.")
@@ -202,7 +213,46 @@ class MainActivity : Activity() {
         handler.removeCallbacks(refreshLog)
     }
 
+    private fun discoverReceiver() {
+        selectedHost = null
+        selectedPort = 47810
+        statusLabel.text = "Searching local Wi-Fi…"
+        val manager = getSystemService(NSD_SERVICE) as NsdManager
+        manager.discoverServices("_viewgo._tcp.", NsdManager.PROTOCOL_DNS_SD, object : NsdManager.DiscoveryListener {
+            override fun onDiscoveryStarted(type: String) = Unit
+            override fun onStartDiscoveryFailed(type: String, error: Int) {
+                manager.stopServiceDiscovery(this)
+                runOnUiThread { statusLabel.text = "Wi-Fi discovery failed (code $error)." }
+            }
+            override fun onStopDiscoveryFailed(type: String, error: Int) { manager.stopServiceDiscovery(this) }
+            override fun onDiscoveryStopped(type: String) = Unit
+            override fun onServiceLost(service: NsdServiceInfo) = Unit
+            override fun onServiceFound(service: NsdServiceInfo) {
+                manager.stopServiceDiscovery(this)
+                try {
+                    @Suppress("DEPRECATION")
+                    manager.resolveService(service, object : NsdManager.ResolveListener {
+                        override fun onResolveFailed(service: NsdServiceInfo, error: Int) {
+                            runOnUiThread { statusLabel.text = "Could not resolve laptop (code $error)." }
+                        }
+                        override fun onServiceResolved(resolved: NsdServiceInfo) {
+                            selectedHost = resolved.host.hostAddress
+                            selectedPort = resolved.port
+                            runOnUiThread { statusLabel.text = "Found laptop: ${resolved.serviceName}" }
+                            AppLog.line("Local discovery found ${resolved.serviceName}")
+                        }
+                    })
+                } catch (error: UnsupportedOperationException) {
+                    runOnUiThread { statusLabel.text = "This Android version cannot resolve local services." }
+                }
+            }
+        })
+    }
+
     companion object {
         private const val REQUEST_CAPTURE = 1001
     }
+
+    private var selectedHost: String? = null
+    private var selectedPort: Int = 47810
 }

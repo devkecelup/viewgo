@@ -36,6 +36,5 @@ android {
 }
 
 dependencies {
-    // No app dependencies on purpose: the MVP uses platform APIs only.
     testImplementation("junit:junit:4.13.2")
 }

@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 aes-gcm = "0.10"
 hmac = "0.12"
+mdns-sd = "0.22"
 minifb = "0.27"
 pbkdf2 = { version = "0.12", features = ["simple"] }
 rand = "0.8"

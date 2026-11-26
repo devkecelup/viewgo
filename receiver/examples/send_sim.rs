@@ -48,10 +48,15 @@ fn main() -> std::io::Result<()> {
 
     let mut cipher = Cipher::new(key, 0);
     let mut writer = stream;
-    let ok = cipher.open(&read_frame(&mut writer, MAX_PLAIN)?).expect("encrypted auth reply");
+    let ok = cipher
+        .open(&read_frame(&mut writer, MAX_PLAIN)?)
+        .expect("encrypted auth reply");
     assert_eq!(ok[0], T_AUTH_OK, "receiver did not acknowledge the session");
 
-    write_frame(&mut writer, &cipher.seal(&[T_VIDEO_CONFIG, 0x04, 0x38, 0x07, 0x80, 30]))?;
+    write_frame(
+        &mut writer,
+        &cipher.seal(&[T_VIDEO_CONFIG, 0x04, 0x38, 0x07, 0x80, 30]),
+    )?;
     let log = b"sim sender online";
     let mut log_payload = vec![T_LOG];
     log_payload.extend_from_slice(log);

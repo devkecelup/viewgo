@@ -1,17 +1,18 @@
 // ViewGo receiver: pairs with an Android sender, decrypts H.264 frames, decodes them with
 // ffmpeg and shows the newest frame in a small window.
 
-use viewgo_receiver::protocol::*;
 use std::collections::HashMap;
 use std::env;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::net::{IpAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{IpAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use viewgo_receiver::protocol::*;
 
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 use minifb::{Key, Window, WindowOptions};
 
 const DEFAULT_PORT: u16 = 47810;
@@ -73,6 +74,11 @@ struct Ffmpeg {
     stdin: BufWriter<std::process::ChildStdin>,
 }
 
+struct AudioPlayer {
+    child: Child,
+    stdin: BufWriter<std::process::ChildStdin>,
+}
+
 fn main() {
     let port = env::args()
         .nth(1)
@@ -100,11 +106,9 @@ fn main() {
     };
 
     let code = shared.issue_code();
+    let _mdns = publish_receiver(port);
     println!("ViewGo receiver listening on port {port}");
-    if let Some(ip) = local_ip() {
-        println!("Phone connects to: {ip}:{port}");
-    }
-    println!("Pairing code: {code}  (valid 120 seconds)");
+    println!("On Android, tap Find laptop; pairing code: {code}  (valid 120 seconds)");
 
     {
         let shared = Arc::clone(&shared);
@@ -129,6 +133,10 @@ fn accept_loop(
             Ok(stream) => stream,
             Err(_) => continue,
         };
+        if *shared.active.lock().unwrap() {
+            drop(stream);
+            continue;
+        }
         let peer = match stream.peer_addr() {
             Ok(addr) => addr.ip(),
             Err(_) => continue,
@@ -183,28 +191,43 @@ fn serve(
         let body = read_frame(&mut stream, MAX_BODY)?;
         let plain = match cipher.open(&body) {
             Some(plain) => plain,
-            None => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "bad record")),
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "bad record",
+                ))
+            }
         };
         if plain.is_empty() {
             continue;
         }
         match plain[0] {
             T_VIDEO_CONFIG => {
-                if plain.len() < 6 {
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "short config"));
-                }
-                let width = u16::from_be_bytes([plain[1], plain[2]]);
-                let height = u16::from_be_bytes([plain[3], plain[4]]);
-                if width == 0 || height == 0 {
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "bad size"));
-                }
+                let (width, height, fps) = decode_status(&plain)?;
+                let dimensions_changed = video_config != Some((width, height));
                 video_config = Some((width, height));
                 shared.set_status(format!("Connected {peer} — {width}x{height}"));
-                builder.start(width, height, Arc::clone(&latest), Arc::clone(&spares), Arc::clone(&frame_seq))?;
+                builder.start(
+                    width,
+                    height,
+                    Arc::clone(&latest),
+                    Arc::clone(&spares),
+                    Arc::clone(&frame_seq),
+                )?;
+                if dimensions_changed {
+                    let mut guard = latest.lock().unwrap();
+                    guard.frame = None;
+                    guard.width = 0;
+                    guard.height = 0;
+                }
+                shared.set_status(format!("Connected {peer} — {width}x{height} — {fps} fps"));
             }
             T_VIDEO_FRAME => {
                 if plain.len() < 10 {
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "short frame"));
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "short frame",
+                    ));
                 }
                 if video_config.is_none() || builder.process.is_none() {
                     continue;
@@ -225,17 +248,65 @@ fn serve(
                     window_start = Instant::now();
                 }
             }
-            T_STOP => break,
-            T_LOG => {
-                let text = String::from_utf8_lossy(&plain[1..]);
-                println!("phone: {text}");
+            T_AUDIO_CONFIG => {
+                if plain.len() != 6 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "short audio config",
+                    ));
+                }
+                let sample_rate = u32::from_be_bytes(plain[1..5].try_into().unwrap());
+                let channels = plain[5];
+                if !(8_000..=192_000).contains(&sample_rate) || !(1..=2).contains(&channels) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "unsupported audio format",
+                    ));
+                }
+                if let Err(error) = builder.start_audio(sample_rate, channels) {
+                    eprintln!("Audio output unavailable (is ffplay installed?): {error}");
+                }
             }
+            T_AUDIO_FRAME => {
+                if plain.len() > 1 && plain.len() <= 16 * 1024 {
+                    builder.write_audio(&plain[1..]);
+                }
+            }
+            T_LOG => {
+                if plain.len() > 8193 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "log too long",
+                    ));
+                }
+                println!("phone: {}", String::from_utf8_lossy(&plain[1..]));
+            }
+            T_STOP => break,
             T_CONTROL => {}
             _ => {}
         }
     }
     println!("Session closed after {received} frames");
     Ok(())
+}
+
+fn decode_status(config: &[u8]) -> std::io::Result<(u16, u16, u8)> {
+    if config.len() != 6 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid video config length",
+        ));
+    }
+    let width = u16::from_be_bytes([config[1], config[2]]);
+    let height = u16::from_be_bytes([config[3], config[4]]);
+    let fps = config[5];
+    if !(2..=4096).contains(&width) || !(2..=4096).contains(&height) || !(1..=120).contains(&fps) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "video config out of range",
+        ));
+    }
+    Ok((width, height, fps))
 }
 
 struct Handshake {
@@ -267,10 +338,17 @@ fn pairing_status(shared: &Shared, peer: IpAddr, client_random: &[u8; 16]) -> u8
     }
 }
 
-fn handshake(stream: &mut TcpStream, peer: IpAddr, shared: &Arc<Shared>) -> std::io::Result<Handshake> {
+fn handshake(
+    stream: &mut TcpStream,
+    peer: IpAddr,
+    shared: &Arc<Shared>,
+) -> std::io::Result<Handshake> {
     let hello = read_frame(stream, MAX_PLAIN)?;
     if hello.len() < 21 || &hello[0..4] != MAGIC || hello[4] != VERSION {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "bad hello"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "bad hello",
+        ));
     }
     let client_random: [u8; 16] = hello[5..21].try_into().unwrap();
 
@@ -289,7 +367,10 @@ fn handshake(stream: &mut TcpStream, peer: IpAddr, shared: &Arc<Shared>) -> std:
 
     if status != STATUS_OK {
         println!("Rejected pairing from {peer} (status {status})");
-        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "pairing rejected"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "pairing rejected",
+        ));
     }
 
     let code = shared.current_code();
@@ -298,10 +379,16 @@ fn handshake(stream: &mut TcpStream, peer: IpAddr, shared: &Arc<Shared>) -> std:
 
     let auth = read_frame(stream, MAX_PLAIN)?;
     if auth.len() != 37 || &auth[0..4] != MAGIC || auth[4] != VERSION {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "bad auth"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "bad auth",
+        ));
     }
     if !proof_matches(&expected, &auth[5..37]) {
-        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "wrong code"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "wrong code",
+        ));
     }
 
     *shared.active.lock().unwrap() = true;
@@ -323,6 +410,8 @@ fn handshake(stream: &mut TcpStream, peer: IpAddr, shared: &Arc<Shared>) -> std:
 #[derive(Default)]
 struct FfmpegBuilder {
     process: Option<Ffmpeg>,
+    audio: Option<AudioPlayer>,
+    dimensions: Option<(usize, usize)>,
 }
 
 impl FfmpegBuilder {
@@ -335,8 +424,17 @@ impl FfmpegBuilder {
         frame_seq: Arc<AtomicU64>,
     ) -> std::io::Result<()> {
         if self.process.is_some() {
-            return Ok(());
+            if self.dimensions == Some((width as usize, height as usize)) {
+                return Ok(());
+            }
+            let old = self.process.take();
+            drop(old);
+            self.dimensions = None;
         }
+        self.kill_audio();
+        let latest_for_reader = Arc::clone(&latest);
+        let spares_for_reader = Arc::clone(&spares);
+        let frame_seq_for_reader = Arc::clone(&frame_seq);
         let ffmpeg = env::var("FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string());
         // shortcut: H.264 decoding runs in software through ffmpeg; move to Media Foundation
         // (D3D11VA) if the target laptop cannot decode 1080p in real time.
@@ -358,6 +456,10 @@ impl FfmpegBuilder {
                 "-an",
                 "-sn",
                 "-dn",
+                "-vf",
+                &format!(
+                    "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
+                ),
                 "-fps_mode",
                 "passthrough",
                 "-f",
@@ -379,7 +481,7 @@ impl FfmpegBuilder {
             let mut reader = BufReader::with_capacity(1 << 20, stdout);
             let frame_size = w * h * 4;
             loop {
-                let mut buffer = spares
+                let mut buffer = spares_for_reader
                     .lock()
                     .unwrap()
                     .pop()
@@ -390,15 +492,15 @@ impl FfmpegBuilder {
                 if reader.read_exact(&mut buffer).is_err() {
                     break;
                 }
-                let mut guard = latest.lock().unwrap();
+                let mut guard = latest_for_reader.lock().unwrap();
                 let old = guard.frame.replace(buffer);
                 guard.width = w;
                 guard.height = h;
                 guard.seq += 1;
                 drop(guard);
-                frame_seq.fetch_add(1, Ordering::Relaxed);
+                frame_seq_for_reader.fetch_add(1, Ordering::Relaxed);
                 if let Some(old) = old {
-                    let mut pool = spares.lock().unwrap();
+                    let mut pool = spares_for_reader.lock().unwrap();
                     if pool.len() < 3 {
                         pool.push(old);
                     }
@@ -410,17 +512,96 @@ impl FfmpegBuilder {
             child,
             stdin: BufWriter::with_capacity(1 << 20, stdin),
         });
+        self.dimensions = Some((w, h));
         Ok(())
     }
 
     fn write(&mut self, annex_b: &[u8]) -> std::io::Result<()> {
         let process = self.process.as_mut().expect("decoder started");
-        process.stdin.write_all(annex_b)?;
-        process.stdin.flush()
+        if let Err(error) = process
+            .stdin
+            .write_all(annex_b)
+            .and_then(|_| process.stdin.flush())
+        {
+            self.process.take();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn start_audio(&mut self, sample_rate: u32, channels: u8) -> std::io::Result<()> {
+        if self.audio.is_some()
+            || !(8_000..=192_000).contains(&sample_rate)
+            || !(1..=2).contains(&channels)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unsupported audio format",
+            ));
+        }
+        let ffplay = env::var("FFPLAY").unwrap_or_else(|_| "ffplay".to_string());
+        let mut child = Command::new(ffplay)
+            .args([
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "error",
+                "-f",
+                "s16le",
+                "-ar",
+                &sample_rate.to_string(),
+                "-ac",
+                &channels.to_string(),
+                "-i",
+                "pipe:0",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+        self.audio = Some(AudioPlayer {
+            stdin: BufWriter::with_capacity(
+                16 * 1024,
+                child.stdin.take().ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "ffplay stdin unavailable")
+                })?,
+            ),
+            child,
+        });
+        Ok(())
+    }
+
+    fn write_audio(&mut self, pcm: &[u8]) {
+        if let Some(audio) = self.audio.as_mut() {
+            if let Err(error) = audio.stdin.write_all(pcm).and_then(|_| audio.stdin.flush()) {
+                self.audio.take();
+                eprintln!("Audio output stopped: {error}");
+            }
+        }
+    }
+
+    fn kill_audio(&mut self) {
+        if let Some(mut audio) = self.audio.take() {
+            let _ = audio.child.kill();
+            let _ = audio.child.wait();
+        }
+    }
+}
+
+impl Drop for FfmpegBuilder {
+    fn drop(&mut self) {
+        self.kill_audio();
     }
 }
 
 impl Drop for Ffmpeg {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for AudioPlayer {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -452,8 +633,8 @@ fn run_window(
     window.set_target_fps(60);
 
     let mut pixels = Vec::<u32>::new();
-    let mut width = 0usize;
-    let mut height = 0usize;
+    let mut frame_w = 0usize;
+    let mut frame_h = 0usize;
     let mut seen = 0u64;
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
@@ -462,17 +643,17 @@ fn run_window(
             let mut guard = latest.lock().unwrap();
             if let Some(frame) = guard.frame.take() {
                 seen = guard.seq;
-                width = guard.width;
-                height = guard.height;
+                frame_w = guard.width;
+                frame_h = guard.height;
                 drop(guard);
 
-                if pixels.len() != width * height {
-                    pixels.resize(width * height, 0);
+                let (window_w, window_h) = window.get_size();
+                let (window_w, window_h) = (window_w.max(1), window_h.max(1));
+                if pixels.len() != window_w * window_h {
+                    pixels.resize(window_w * window_h, 0);
                 }
-                // ffmpeg gives BGRA bytes; minifb wants 0x00RRGGBB.
-                for (pixel, bgra) in pixels.iter_mut().zip(frame.chunks_exact(4)) {
-                    *pixel = (bgra[0] as u32) | ((bgra[1] as u32) << 8) | ((bgra[2] as u32) << 16);
-                }
+                pixels.fill(0x000000);
+                scale_fit_bgra(&frame, frame_w, frame_h, &mut pixels, window_w, window_h);
                 if let Ok(mut pool) = spares.lock() {
                     if pool.len() < 3 {
                         pool.push(frame);
@@ -485,18 +666,85 @@ fn run_window(
         let status = shared.status.lock().unwrap().clone();
         window.set_title(&format!("ViewGo — {status} — port {port} — code {code}"));
 
-        if width > 0 && height > 0 && !pixels.is_empty() {
-            let _ = window.update_with_buffer(&pixels, width, height);
+        if frame_w > 0 && frame_h > 0 && !pixels.is_empty() {
+            let (window_w, window_h) = window.get_size();
+            let _ = window.update_with_buffer(&pixels, window_w.max(1), window_h.max(1));
         } else {
             let _ = window.update();
         }
     }
 }
 
-fn local_ip() -> Option<IpAddr> {
-    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("8.8.8.8:80").ok()?;
-    Some(socket.local_addr().ok()?.ip())
+fn publish_receiver(port: u16) -> Option<ServiceDaemon> {
+    let daemon = match ServiceDaemon::new() {
+        Ok(daemon) => daemon,
+        Err(error) => {
+            eprintln!("Local discovery unavailable: {error}");
+            return None;
+        }
+    };
+    let info = match ServiceInfo::new(
+        "_viewgo._tcp.local.",
+        "ViewGo",
+        "viewgo.local.",
+        "0.0.0.0",
+        port,
+        &[("version", "1")][..],
+    ) {
+        Ok(info) => info.enable_addr_auto(),
+        Err(error) => {
+            eprintln!("Local discovery unavailable: {error}");
+            let _ = daemon.shutdown();
+            return None;
+        }
+    };
+    if let Err(error) = daemon.register(info) {
+        eprintln!("Local discovery unavailable: {error}");
+        let _ = daemon.shutdown();
+        return None;
+    }
+    Some(daemon)
+}
+
+fn fit_size(src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> (usize, usize) {
+    if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
+        return (0, 0);
+    }
+    let scale = (dst_w as f64 / src_w as f64).min(dst_h as f64 / src_h as f64);
+    (
+        ((src_w as f64 * scale).round() as usize).clamp(1, dst_w),
+        ((src_h as f64 * scale).round() as usize).clamp(1, dst_h),
+    )
+}
+
+fn scale_fit_bgra(
+    frame: &[u8],
+    src_w: usize,
+    src_h: usize,
+    out: &mut [u32],
+    dst_w: usize,
+    dst_h: usize,
+) {
+    if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
+        return;
+    }
+    let (draw_w, draw_h) = fit_size(src_w, src_h, dst_w, dst_h);
+    let left = (dst_w - draw_w) / 2;
+    let top = (dst_h - draw_h) / 2;
+    for y in 0..draw_h {
+        let sy = y * src_h / draw_h;
+        for x in 0..draw_w {
+            let sx = x * src_w / draw_w;
+            let at = (sy * src_w + sx) * 4;
+            if at + 2 >= frame.len() {
+                return;
+            }
+            let b = frame[at] as u32;
+            let g = frame[at + 1] as u32;
+            let r = frame[at + 2] as u32;
+            out[(top + y) * dst_w + left + x] = (r << 16) | (g << 8) | b;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -524,13 +772,59 @@ mod tests {
     }
 
     #[test]
+    fn fit_scale_keeps_landscape_and_portrait_content_centered() {
+        let mut out = vec![0u32; 4 * 4];
+        let src = [
+            0, 0, 255, 255, // red
+            0, 255, 0, 255, // green
+        ];
+        scale_fit_bgra(&src, 2, 1, &mut out, 4, 4);
+        assert_eq!(out[4], 0x00ff0000);
+        assert_eq!(out[5], 0x00ff0000);
+        assert_eq!(out[6], 0x0000ff00);
+        assert_eq!(out[7], 0x0000ff00);
+        assert_eq!(out[0], 0);
+    }
+
+    #[test]
+    fn config_dimensions_change_after_rotation() {
+        let mut builder = FfmpegBuilder::default();
+        assert_eq!(builder.dimensions, None);
+        builder.dimensions = Some((1920, 1080));
+        assert_eq!(builder.dimensions, Some((1920, 1080)));
+        builder.dimensions = Some((1080, 1920));
+        assert_eq!(builder.dimensions, Some((1080, 1920)));
+    }
+
+    #[test]
+    fn fit_viewport_preserves_portrait_and_landscape_aspect() {
+        assert_eq!(fit_size(1080, 1920, 540, 360), (203, 360));
+        assert_eq!(fit_size(1920, 1080, 540, 360), (540, 304));
+        assert_eq!(fit_size(0, 1920, 540, 360), (0, 0));
+    }
+
+    #[test]
+    fn video_config_rejects_truncated_zero_and_unbounded_dimensions() {
+        assert!(decode_status(&[T_VIDEO_CONFIG, 0, 0, 0, 0]).is_err());
+        assert!(decode_status(&[T_VIDEO_CONFIG, 0, 0, 0, 2, 30]).is_err());
+        assert!(decode_status(&[T_VIDEO_CONFIG, 0x20, 1, 0, 2, 30]).is_err());
+        assert_eq!(
+            decode_status(&[T_VIDEO_CONFIG, 4, 0x38, 7, 0x80, 30]).unwrap(),
+            (1080, 1920, 30)
+        );
+    }
+
+    #[test]
     fn fresh_code_accepts() {
         assert_eq!(pairing_status(&shared(false), peer(2), &[7; 16]), STATUS_OK);
     }
 
     #[test]
     fn expired_code_rejects() {
-        assert_eq!(pairing_status(&shared(true), peer(2), &[7; 16]), STATUS_EXPIRED);
+        assert_eq!(
+            pairing_status(&shared(true), peer(2), &[7; 16]),
+            STATUS_EXPIRED
+        );
     }
 
     #[test]
