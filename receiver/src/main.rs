@@ -431,7 +431,6 @@ impl FfmpegBuilder {
             drop(old);
             self.dimensions = None;
         }
-        self.kill_audio();
         let latest_for_reader = Arc::clone(&latest);
         let spares_for_reader = Arc::clone(&spares);
         let frame_seq_for_reader = Arc::clone(&frame_seq);
@@ -456,10 +455,6 @@ impl FfmpegBuilder {
                 "-an",
                 "-sn",
                 "-dn",
-                "-vf",
-                &format!(
-                    "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
-                ),
                 "-fps_mode",
                 "passthrough",
                 "-f",
@@ -717,6 +712,11 @@ fn fit_size(src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> (usize, u
     )
 }
 
+fn bgra_pixel(frame: &[u8], src_w: usize, x: usize, y: usize) -> (u32, u32, u32) {
+    let at = (y * src_w + x) * 4;
+    (frame[at] as u32, frame[at + 1] as u32, frame[at + 2] as u32)
+}
+
 fn scale_fit_bgra(
     frame: &[u8],
     src_w: usize,
@@ -728,20 +728,70 @@ fn scale_fit_bgra(
     if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
         return;
     }
+    if frame.len() < src_w * src_h * 4 {
+        return;
+    }
     let (draw_w, draw_h) = fit_size(src_w, src_h, dst_w, dst_h);
     let left = (dst_w - draw_w) / 2;
     let top = (dst_h - draw_h) / 2;
+    // Downscaling by nearest-neighbour is what made text look soft and jagged; average the
+    // covered source pixels instead. Upscaling uses bilinear so enlarged windows stay smooth.
+    let upscale = draw_w > src_w || draw_h > src_h;
+
     for y in 0..draw_h {
-        let sy = y * src_h / draw_h;
         for x in 0..draw_w {
-            let sx = x * src_w / draw_w;
-            let at = (sy * src_w + sx) * 4;
-            if at + 2 >= frame.len() {
-                return;
-            }
-            let b = frame[at] as u32;
-            let g = frame[at + 1] as u32;
-            let r = frame[at + 2] as u32;
+            let (b, g, r) = if upscale {
+                let fx = (x as f64 + 0.5) * src_w as f64 / draw_w as f64 - 0.5;
+                let fy = (y as f64 + 0.5) * src_h as f64 / draw_h as f64 - 0.5;
+                let x0f = fx.max(0.0);
+                let y0f = fy.max(0.0);
+                let x0 = (x0f as usize).min(src_w - 1);
+                let y0 = (y0f as usize).min(src_h - 1);
+                let x1 = (x0 + 1).min(src_w - 1);
+                let y1 = (y0 + 1).min(src_h - 1);
+                let tx = (fx - x0f as f64).clamp(0.0, 1.0);
+                let ty = (fy - y0f as f64).clamp(0.0, 1.0);
+                let p00 = bgra_pixel(frame, src_w, x0, y0);
+                let p10 = bgra_pixel(frame, src_w, x1, y0);
+                let p01 = bgra_pixel(frame, src_w, x0, y1);
+                let p11 = bgra_pixel(frame, src_w, x1, y1);
+                let mix = |a: u32, b: u32, c: u32, d: u32| -> u32 {
+                    let top = a as f64 * (1.0 - tx) + b as f64 * tx;
+                    let bottom = c as f64 * (1.0 - tx) + d as f64 * tx;
+                    (top * (1.0 - ty) + bottom * ty).round() as u32
+                };
+                (
+                    mix(p00.0, p10.0, p01.0, p11.0),
+                    mix(p00.1, p10.1, p01.1, p11.1),
+                    mix(p00.2, p10.2, p01.2, p11.2),
+                )
+            } else {
+                let x0 = x * src_w / draw_w;
+                let x1 = (((x + 1) * src_w + draw_w - 1) / draw_w)
+                    .min(src_w)
+                    .max(x0 + 1);
+                let y0 = y * src_h / draw_h;
+                let y1 = (((y + 1) * src_h + draw_h - 1) / draw_h)
+                    .min(src_h)
+                    .max(y0 + 1);
+                let mut sum = [0u64; 3];
+                let mut count = 0u64;
+                for sy in y0..y1 {
+                    for sx in x0..x1 {
+                        let p = bgra_pixel(frame, src_w, sx, sy);
+                        sum[0] += p.0 as u64;
+                        sum[1] += p.1 as u64;
+                        sum[2] += p.2 as u64;
+                        count += 1;
+                    }
+                }
+                let count = count.max(1);
+                (
+                    (sum[0] / count) as u32,
+                    (sum[1] / count) as u32,
+                    (sum[2] / count) as u32,
+                )
+            };
             out[(top + y) * dst_w + left + x] = (r << 16) | (g << 8) | b;
         }
     }
@@ -780,10 +830,22 @@ mod tests {
         ];
         scale_fit_bgra(&src, 2, 1, &mut out, 4, 4);
         assert_eq!(out[4], 0x00ff0000);
-        assert_eq!(out[5], 0x00ff0000);
-        assert_eq!(out[6], 0x0000ff00);
         assert_eq!(out[7], 0x0000ff00);
         assert_eq!(out[0], 0);
+    }
+
+    #[test]
+    fn downscale_averages_source_pixels_instead_of_dropping_them() {
+        // 2x2 source: one red, one green, one blue, one white -> 1x1 output is mid grey.
+        let src = [
+            0, 0, 255, 255, // red
+            0, 255, 0, 255, // green
+            255, 0, 0, 255, // blue
+            255, 255, 255, 255, // white
+        ];
+        let mut out = vec![0u32; 1];
+        scale_fit_bgra(&src, 2, 2, &mut out, 1, 1);
+        assert_eq!(out[0], 0x007f7f7f);
     }
 
     #[test]

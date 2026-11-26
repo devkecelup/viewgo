@@ -28,6 +28,7 @@ class MainActivity : Activity() {
 
     private lateinit var codeField: EditText
     private lateinit var qualityField: Spinner
+    private lateinit var shareField: Spinner
     private lateinit var statusLabel: TextView
     private lateinit var logView: TextView
     private val handler = Handler(Looper.getMainLooper())
@@ -85,7 +86,18 @@ class MainActivity : Activity() {
             adapter = ArrayAdapter(
                 this@MainActivity,
                 android.R.layout.simple_spinner_dropdown_item,
-                listOf("1080p — 10 Mbps", "720p — 5 Mbps"),
+                listOf("1080p — 12 Mbps", "720p — 6 Mbps"),
+            )
+        }
+        shareField = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                if (Build.VERSION.SDK_INT >= 34) {
+                    listOf("Share the whole screen", "Share one app")
+                } else {
+                    listOf("Share the whole screen")
+                },
             )
         }
 
@@ -122,7 +134,7 @@ class MainActivity : Activity() {
             }
         }
 
-        listOf(title, intro, audioHint, discover, codeField, qualityField, connect, stop, statusLabel).forEach {
+        listOf(title, intro, audioHint, discover, codeField, qualityField, shareField, connect, stop, statusLabel).forEach {
             root.addView(it, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
         root.addView(TextView(this).apply {
@@ -165,12 +177,21 @@ class MainActivity : Activity() {
             code = code,
             width = if (quality == 0) 1080 else 720,
             height = if (quality == 0) 1920 else 1280,
-            bitrate = if (quality == 0) 10_000_000 else 5_000_000,
+            bitrate = if (quality == 0) 12_000_000 else 6_000_000,
         )
         val manager = getSystemService(MediaProjectionManager::class.java)
-        AppLog.line("Requesting screen and playback capture permission")
+        val shareApp = Build.VERSION.SDK_INT >= 34 && shareField.selectedItemPosition == 1
+        AppLog.line(
+            if (shareApp) "Requesting permission to share one app"
+            else "Requesting screen and playback capture permission"
+        )
         val captureIntent = if (Build.VERSION.SDK_INT >= 34) {
-            manager.createScreenCaptureIntent(MediaProjectionConfig.createConfigForDefaultDisplay())
+            val config = if (shareApp) {
+                MediaProjectionConfig.createConfigForUserChoice()
+            } else {
+                MediaProjectionConfig.createConfigForDefaultDisplay()
+            }
+            manager.createScreenCaptureIntent(config)
         } else {
             manager.createScreenCaptureIntent()
         }

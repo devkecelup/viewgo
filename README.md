@@ -17,9 +17,13 @@ Read `PRD.md` for scope and `docs/PROTOCOL.md` for the wire format.
   temporary 9-character pairing code (120 s, single use, rate limited per device address).
 - AES-256-GCM stream, key derived from the code with PBKDF2; the code itself is never sent.
 - Android `MediaProjection` capture with the required consent dialog and foreground notification.
-- H.264 up to 1080p30 at 10 Mbps or 720p30 at 5 Mbps; uses the screen aspect ratio within the
-  selected resolution (portrait 1080x1920 or landscape 1920x1080) and even dimensions, and falls
-  back to 720p if the 1080p encoder or capture surface cannot start.
+- H.264 up to 1080p30 at 12 Mbps or 720p30 at 6 Mbps. The short side follows the quality choice and
+  the long side keeps the phone's native proportions (1080x2400 stays 1080x2400), falling back to
+  720p if the encoder or capture surface cannot start.
+- Rotating the phone rebuilds the encoder and virtual display in place, so portrait/landscape
+  rotation keeps the stream running instead of stopping it.
+- Android 14+ can share only one chosen app instead of the whole screen; earlier versions share the
+  whole screen.
 - Capturable internal media/game audio streams as PCM over the encrypted session; Android or an
   individual app may block playback capture.
 - Laptop shows the stream in a small window, with resolution and measured frame rate in the title.
@@ -58,7 +62,8 @@ cd android
 1. Start `viewgo-receiver.exe` (optionally `viewgo-receiver.exe 47810`). It prints the laptop
   pairing code. Allow it on your Windows private network when Firewall asks.
 2. Install the APK on the phone and open **ViewGo**.
-3. Tap **Find laptop**, enter the pairing code, pick 1080p or 720p, and press **Connect**.
+3. Tap **Find laptop**, enter the pairing code, pick 1080p or 720p, and choose **Share the whole
+   screen** or (Android 14+) **Share one app**. Press **Connect**.
 4. Allow screen capture when Android asks.
 5. Stop with **Stop mirroring** in the app or the notification action.
 
@@ -80,15 +85,17 @@ cd android
 receiver path can be checked without a phone:
 
 ```powershell
-cargo run --example send_sim -- 127.0.0.1 47810 <pairing code> sample.h264
+cargo run --example send_sim -- 127.0.0.1 47810 <pairing code> sample.h264 1080 1920
+# add more <file> <width> <height> triples to replay a rotation mid-session
 ```
 
 ## Known limits
 
 - No recording, multi-viewer, touch control, iOS, or cloud relay.
-- Screen orientation tracks the phone; rotating within portrait/landscape sizes adjusts the capture.
-  Switching between portrait and landscape stops the stream with a reconnect prompt (H.264 encoder
-  dimensions are fixed for a session).
+- Rotation recreates the encoder, which can cause a short pause (a fraction of a second) and a new
+  keyframe; the receiver restarts its decoder and keeps the window.
+- Games and apps that mark their window as secure (many banking apps and some DRM/game surfaces)
+  are captured as black by Android; that is the platform's protection, not a ViewGo bug.
 - Playback audio capture is best-effort. Apps that mark audio as non-capturable (often DRM/voice apps)
   will stay silent by Android policy.
 - Software H.264 decode on the laptop through ffmpeg; hardware decode is a later step.

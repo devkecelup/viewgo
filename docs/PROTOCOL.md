@@ -71,7 +71,8 @@ a counter it has already seen for a direction.
 
 ```
 0x10  AUTH_OK      "VGMR" (only used once, as the first S->C record)
-0x01  VIDEO_CONFIG u16 width, u16 height, u8 fps
+0x01  VIDEO_CONFIG u16 width, u16 height, u8 fps. May be resent mid-session after a rotation or
+                   capture-size change; the receiver restarts its decoder for the new size.
 0x02  VIDEO_FRAME  u8 flags (bit0 = keyframe), u64 pts_us, then H.264 Annex-B bytes
 0x03  CONTROL      u8 command, optional bytes:
                    1 = request keyframe (no args)
