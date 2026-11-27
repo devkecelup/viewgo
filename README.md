@@ -28,8 +28,10 @@ Read `PRD.md` for scope and `docs/PROTOCOL.md` for the wire format.
   and install `ffplay` on Windows. Android or an individual app may block playback capture.
 - The laptop opens two native windows (white/green theme): **ViewGo** holds the pairing code, live
   status, measured resolution/frame rate (`in / dec fps`), the log panel and how-to-connect, and
-  **ViewGo Mirror** carries only the picture — borderless and title-stable so OBS can window-capture
-  it and show it fullscreen.
+  **ViewGo Mirror** carries only the picture. The mirror window auto-sizes to the stream's aspect
+  (720 px tall, width follows the share screen) so the picture fills it with no black bars, and it
+  is movable/maximizable like a normal window. An **OBS capture** card in ViewGo has a
+  *Borderless mirror window* toggle for a clean window capture — toggling recreates that window.
 - Delay is bounded instead of queued: the phone keeps at most two frames in flight, drops the
   oldest (then requests a fresh keyframe) rather than building up delay, and logs `encode delay
   X ms` / `send blocked X ms` / `dropped N frames`; the laptop shows `in / dec fps` so a stalled

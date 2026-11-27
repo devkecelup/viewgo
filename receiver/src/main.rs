@@ -759,6 +759,14 @@ const MUTED: egui::Color32 = egui::Color32::from_rgb(0x5f, 0x67, 0x72);
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x0f, 0x7b, 0x4f);
 const ACCENT_INK: egui::Color32 = egui::Color32::from_rgb(0xff, 0xff, 0xff);
 
+/// Stable id so OBS Window Capture keeps matching the title across repaints.
+fn mirror_viewport() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("viewgo-mirror")
+}
+
+/// Target height for the mirror window; width follows the stream aspect so the picture fills it.
+const MIRROR_H: f32 = 720.0;
+
 struct ViewGoApp {
     shared: Arc<Shared>,
     latest: Arc<Mutex<Latest>>,
@@ -771,6 +779,12 @@ struct ViewGoApp {
     area: (usize, usize),
     tex_size: (usize, usize),
     texture: Option<egui::TextureHandle>,
+    /// Last stream dimensions the mirror window was sized for.
+    stream_size: Option<(u32, u32)>,
+    /// Borderless mirror window (clean OBS capture). Toggling recreates the native window.
+    borderless: bool,
+    /// Counts frames until the mirror window is recreated after a toggle.
+    recreate_in: u32,
 }
 
 impl ViewGoApp {
@@ -814,6 +828,9 @@ impl ViewGoApp {
             area: (0, 0),
             tex_size: (0, 0),
             texture: None,
+            stream_size: None,
+            borderless: false,
+            recreate_in: 0,
         }))
     }
 
@@ -845,6 +862,20 @@ impl ViewGoApp {
         let avail = mirror_ui.available_size();
         let area = ((avail.x.max(1.0)) as usize, (avail.y.max(1.0)) as usize);
         let fresh = self.take_frame();
+        // Follow the share screen: keep the mirror window at 720px tall and let the width track the
+        // stream aspect, so a landscape game fills the window instead of a strip in a portrait box.
+        if let Some((fw, fh)) = self.last.as_ref().map(|(_, w, h)| (*w as u32, *h as u32)) {
+            if fw > 0 && fh > 0 && self.stream_size != Some((fw, fh)) {
+                self.stream_size = Some((fw, fh));
+                let width = (f64::from(MIRROR_H) * f64::from(fw) / f64::from(fh))
+                    .round()
+                    .clamp(320.0, 1600.0) as f32;
+                ctx.send_viewport_cmd_to(
+                    mirror_viewport(),
+                    egui::ViewportCommand::InnerSize(egui::vec2(width, MIRROR_H)),
+                );
+            }
+        }
         if (fresh || self.area != area) && self.last.is_some() {
             let (frame, fw, fh) = self.last.as_ref().unwrap();
             let (dw, dh) = fit_size(*fw, *fh, area.0, area.1);
@@ -998,46 +1029,76 @@ impl eframe::App for ViewGoApp {
                         .color(INK),
                 );
             });
+            ui.add_space(14.0);
+            card(ui, |ui| {
+                ui.label(egui::RichText::new("OBS capture").size(13.0).color(MUTED));
+                ui.add_space(8.0);
+                let mut borderless = self.borderless;
+                if ui
+                    .checkbox(&mut borderless, "Borderless mirror window")
+                    .changed()
+                {
+                    self.borderless = borderless;
+                    let _ =
+                        ctx.send_viewport_cmd_to(mirror_viewport(), egui::ViewportCommand::Close);
+                    // Give the close a few frames before reopening with the new style.
+                    self.recreate_in = 3;
+                }
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("On: clean picture for OBS. Off: movable and maximizable.")
+                        .size(12.0)
+                        .color(MUTED),
+                );
+            });
         });
 
-        // The picture lives in its own borderless window so OBS can window-capture it clean and
-        // show it fullscreen; this window stays a control panel with no video.
-        let mirror = egui::ViewportId::from_hash_of("viewgo-mirror");
-        let builder = egui::ViewportBuilder::default()
-            .with_title("ViewGo Mirror")
-            .with_decorations(false)
-            .with_inner_size([540.0, 960.0])
-            .with_min_inner_size([240.0, 420.0]);
-        ctx.show_viewport_immediate(mirror, builder, |mirror_ui, _| {
-            self.update_picture(mirror_ui, &ctx);
-            mirror_ui.with_layout(
-                egui::Layout::centered_and_justified(egui::Direction::TopDown),
-                |ui| match (&self.texture, self.tex_size) {
-                    (Some(tex), (dw, dh)) if dw > 0 && dh > 0 => {
-                        let size = egui::vec2(dw as f32, dh as f32);
-                        ui.add(egui::Image::new((tex.id(), size)).fit_to_exact_size(size));
-                    }
-                    _ => {
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(40.0);
-                            ui.label(
-                                egui::RichText::new("Waiting for a phone")
-                                    .size(24.0)
+        // The picture lives in its own window: movable and maximizable by default, or borderless
+        // for a clean OBS capture (toggle in the side panel; that recreates the native window).
+        let mirror = mirror_viewport();
+        if self.recreate_in > 0 {
+            self.recreate_in -= 1;
+            if self.recreate_in == 0 {
+                // Re-fit to the stream once it shows again.
+                self.stream_size = None;
+            }
+        } else {
+            let builder = egui::ViewportBuilder::default()
+                .with_title("ViewGo Mirror")
+                .with_decorations(!self.borderless)
+                .with_inner_size([540.0, MIRROR_H])
+                .with_min_inner_size([240.0, 320.0]);
+            ctx.show_viewport_immediate(mirror, builder, |mirror_ui, _| {
+                self.update_picture(mirror_ui, &ctx);
+                mirror_ui.with_layout(
+                    egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                    |ui| match (&self.texture, self.tex_size) {
+                        (Some(tex), (dw, dh)) if dw > 0 && dh > 0 => {
+                            let size = egui::vec2(dw as f32, dh as f32);
+                            ui.add(egui::Image::new((tex.id(), size)).fit_to_exact_size(size));
+                        }
+                        _ => {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(40.0);
+                                ui.label(
+                                    egui::RichText::new("Waiting for a phone")
+                                        .size(24.0)
+                                        .color(MUTED),
+                                );
+                                ui.add_space(10.0);
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Type the pairing code on your phone, on the same Wi-Fi.",
+                                    )
+                                    .size(14.0)
                                     .color(MUTED),
-                            );
-                            ui.add_space(10.0);
-                            ui.label(
-                                egui::RichText::new(
-                                    "Type the pairing code on your phone, on the same Wi-Fi.",
-                                )
-                                .size(14.0)
-                                .color(MUTED),
-                            );
-                        });
-                    }
-                },
-            );
-        });
+                                );
+                            });
+                        }
+                    },
+                );
+            });
+        }
 
         egui::CentralPanel::default().show(ui, |ui| {
             ui.with_layout(
