@@ -54,6 +54,8 @@ struct Shared {
     attempts: Mutex<HashMap<IpAddr, (u32, Instant)>>,
     seen_randoms: Mutex<Vec<[u8; 16]>>,
     status: Mutex<String>,
+    /// When the current session started, for the idle/quality readout.
+    started: Mutex<Option<Instant>>,
 }
 
 impl Shared {
@@ -143,6 +145,7 @@ fn main() {
         attempts: Mutex::new(HashMap::new()),
         seen_randoms: Mutex::new(Vec::new()),
         status: Mutex::new("Waiting for a phone".to_string()),
+        started: Mutex::new(None),
     });
 
     let latest = Arc::new(Mutex::new(Latest::new()));
@@ -216,6 +219,7 @@ fn accept_loop(
                 log(format!("Session ended: {error}"));
             }
             *shared.active.lock().unwrap() = false;
+            *shared.started.lock().unwrap() = None;
             shared.set_status("Waiting for a phone");
             let code = shared.issue_code();
             log(format!("Pairing code: {code}  (valid 120 seconds)"));
@@ -484,6 +488,7 @@ fn handshake(
     }
 
     *shared.active.lock().unwrap() = true;
+    *shared.started.lock().unwrap() = Some(Instant::now());
     {
         let mut seen = shared.seen_randoms.lock().unwrap();
         seen.push(client_random);
@@ -1100,12 +1105,22 @@ impl eframe::App for ViewGoApp {
             });
         }
 
+        let since = self
+            .shared
+            .started
+            .lock()
+            .unwrap()
+            .map(|t| t.elapsed().as_secs());
+
         egui::CentralPanel::default().show(ui, |ui| {
             ui.with_layout(
                 egui::Layout::centered_and_justified(egui::Direction::TopDown),
                 |ui| {
                     ui.vertical_centered(|ui| {
-                        ui.add_space(40.0);
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(460.0, 170.0), egui::Sense::hover());
+                        paint_flow(ui.painter(), rect);
+                        ui.add_space(26.0);
                         ui.label(
                             egui::RichText::new("The picture is in the ViewGo Mirror window")
                                 .size(24.0)
@@ -1120,6 +1135,14 @@ impl eframe::App for ViewGoApp {
                             .size(15.0)
                             .color(MUTED),
                         );
+                        if let Some(secs) = since {
+                            ui.add_space(20.0);
+                            chip(
+                                ui,
+                                &format!("Session {:02}:{:02}", secs / 60, secs % 60),
+                                true,
+                            );
+                        }
                     });
                 },
             );
@@ -1138,13 +1161,8 @@ fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(2.0);
 }
 
-fn badge(ui: &mut egui::Ui, active: bool) {
-    let label = if active {
-        "Mirroring"
-    } else {
-        "Waiting for a phone"
-    };
-    let colour = if active { ACCENT_INK } else { MUTED };
+fn chip(ui: &mut egui::Ui, label: &str, accent: bool) {
+    let colour = if accent { ACCENT_INK } else { MUTED };
     let galley =
         ui.painter()
             .layout_no_wrap(label.to_string(), egui::FontId::proportional(13.0), colour);
@@ -1154,9 +1172,21 @@ fn badge(ui: &mut egui::Ui, active: bool) {
     ui.painter().rect_filled(
         rect,
         egui::CornerRadius::same((size.y / 2.0) as u8),
-        if active { ACCENT } else { SURFACE },
+        if accent { ACCENT } else { SURFACE },
     );
     ui.painter().galley(rect.min + pad, galley, colour);
+}
+
+fn badge(ui: &mut egui::Ui, active: bool) {
+    chip(
+        ui,
+        if active {
+            "Mirroring"
+        } else {
+            "Waiting for a phone"
+        },
+        active,
+    );
 }
 
 fn paint_mark(painter: &egui::Painter, rect: egui::Rect) {
@@ -1171,6 +1201,93 @@ fn paint_mark(painter: &egui::Painter, rect: egui::Rect) {
         egui::vec2(rect.width() * 0.34, 2.0),
     );
     painter.rect_filled(stand, 0.0, BG);
+}
+
+/// Idle-state flow picture: phone -> Wi-Fi dots -> laptop showing the mirror window.
+/// Drawn with the painter so it stays vector-sharp at any window size.
+fn paint_flow(painter: &egui::Painter, rect: egui::Rect) {
+    let cy = rect.center().y;
+
+    // Phone on the left.
+    let phone =
+        egui::Rect::from_center_size(egui::pos2(rect.left() + 64.0, cy), egui::vec2(58.0, 106.0));
+    painter.rect_filled(phone, egui::CornerRadius::same(12), BG);
+    painter.rect_stroke(
+        phone,
+        egui::CornerRadius::same(12),
+        egui::Stroke::new(1.6, BORDER),
+        egui::StrokeKind::Inside,
+    );
+    painter.rect_filled(
+        egui::Rect::from_center_size(
+            egui::pos2(phone.center().x, phone.center().y - 5.0),
+            egui::vec2(40.0, 66.0),
+        ),
+        egui::CornerRadius::same(4),
+        ACCENT,
+    );
+    painter.rect_filled(
+        egui::Rect::from_center_size(
+            egui::pos2(phone.center().x, phone.max.y - 13.0),
+            egui::vec2(18.0, 3.0),
+        ),
+        egui::CornerRadius::same(2),
+        SURFACE,
+    );
+
+    // Laptop on the right, its screen is the green mirror window with the ViewGo glyph.
+    let laptop = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - 98.0, cy - 6.0),
+        egui::vec2(170.0, 104.0),
+    );
+    painter.rect_filled(laptop, egui::CornerRadius::same(8), BG);
+    painter.rect_stroke(
+        laptop,
+        egui::CornerRadius::same(8),
+        egui::Stroke::new(1.6, BORDER),
+        egui::StrokeKind::Inside,
+    );
+    let mirror = egui::Rect::from_center_size(
+        egui::pos2(laptop.center().x, laptop.center().y - 3.0),
+        egui::vec2(148.0, 80.0),
+    );
+    painter.rect_filled(mirror, egui::CornerRadius::same(4), ACCENT);
+    painter.rect_filled(
+        egui::Rect::from_center_size(
+            egui::pos2(mirror.center().x, mirror.center().y - 6.0),
+            egui::vec2(54.0, 34.0),
+        ),
+        egui::CornerRadius::same(3),
+        BG,
+    );
+    painter.rect_filled(
+        egui::Rect::from_center_size(
+            egui::pos2(mirror.center().x, mirror.center().y + 24.0),
+            egui::vec2(36.0, 3.0),
+        ),
+        egui::CornerRadius::same(2),
+        BG,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(laptop.left() - 16.0, laptop.bottom() + 6.0),
+            egui::pos2(laptop.right() + 16.0, laptop.bottom() + 6.0),
+        ],
+        egui::Stroke::new(2.4, BORDER),
+    );
+
+    // Wi-Fi dots travelling from the phone to the laptop.
+    let start = phone.right() + 30.0;
+    let end = laptop.left() - 30.0;
+    for (i, radius) in [3.0f32, 4.5, 6.0].into_iter().enumerate() {
+        let t = i as f32 / 2.0;
+        let x = start + (end - start) * t;
+        painter.circle_filled(
+            egui::pos2(x, cy),
+            radius,
+            if i == 2 { ACCENT } else { SURFACE },
+        );
+    }
 }
 
 fn publish_receiver(port: u16) -> Option<ServiceDaemon> {
@@ -1317,6 +1434,7 @@ mod tests {
             attempts: Mutex::new(HashMap::new()),
             seen_randoms: Mutex::new(Vec::new()),
             status: Mutex::new(String::new()),
+            started: Mutex::new(None),
         })
     }
 

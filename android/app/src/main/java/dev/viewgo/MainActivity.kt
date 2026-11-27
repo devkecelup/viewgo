@@ -18,13 +18,12 @@ import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.Spinner
+import android.widget.Switch
 import android.widget.TextView
 
 // Palette dealt by design-taste-frontend (`start.mjs brand --page software --bg #fff
@@ -40,13 +39,18 @@ private const val C_ERROR = "#B42318"
 class MainActivity : Activity() {
 
     private lateinit var codeField: EditText
-    private lateinit var qualityField: Spinner
-    private lateinit var shareField: Spinner
-    private lateinit var audioField: Spinner
     private lateinit var statusLabel: TextView
     private lateinit var laptopStatus: TextView
+    private lateinit var statusDot: View
+    private lateinit var primaryButton: Button
     private var selectedHost: String? = null
     private var selectedPort: Int = 47810
+
+    // Option state — chip rows and a switch replace the old spinners.
+    private var qualityIndex = 0
+    private var shareIndex = 0
+    private var audioOn = true
+    private var mirroring = false
 
     private var pending: Pending? = null
 
@@ -73,32 +77,113 @@ class MainActivity : Activity() {
         setPadding(dp(18), dp(16), dp(18), dp(16))
     }
 
-    private fun stepHead(iconRes: Int, step: String, title: String): LinearLayout =
+    /** Timeline head: a numbered green circle, the step title, and the step's glyph on the right. */
+    private fun stepHead(step: String, iconRes: Int, title: String): LinearLayout =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            val icon = ImageView(this@MainActivity).apply {
-                setImageResource(iconRes)
-                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            }
             addView(
-                icon,
-                LinearLayout.LayoutParams(dp(20), dp(20)),
+                TextView(this@MainActivity).apply {
+                    text = step
+                    textSize = 13f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(Color.WHITE)
+                    gravity = Gravity.CENTER
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(Color.parseColor(C_ACCENT))
+                    }
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                },
+                LinearLayout.LayoutParams(dp(26), dp(26)),
             )
             addView(
                 TextView(this@MainActivity).apply {
-                    text = "$step  $title"
-                    textSize = 15f
+                    text = title
+                    textSize = 16f
                     setTextColor(Color.parseColor(C_INK))
                     typeface = Typeface.DEFAULT_BOLD
                 },
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    marginStart = dp(10)
+                    marginStart = dp(12)
+                },
+            )
+            addView(
+                ImageView(this@MainActivity).apply {
+                    setImageResource(iconRes)
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                },
+                LinearLayout.LayoutParams(dp(20), dp(20)),
+            )
+        }
+
+    /** Small icon + label above a control. */
+    private fun optionLabel(iconRes: Int, label: String): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(
+                ImageView(this@MainActivity).apply {
+                    setImageResource(iconRes)
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                },
+                LinearLayout.LayoutParams(dp(18), dp(18)),
+            )
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = label
+                    textSize = 14f
+                    setTextColor(Color.parseColor(C_MUTED))
+                },
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    marginStart = dp(8)
                 },
             )
         }
 
-    private fun optionRow(iconRes: Int, label: String, spinner: Spinner): LinearLayout =
+    /** Equal-width selectable chips; the selected one fills green. */
+    private fun chipGroup(labels: List<String>, selected: Int, onSelect: (Int) -> Unit): LinearLayout {
+        val chips = mutableListOf<TextView>()
+        fun paint(index: Int) {
+            chips.forEachIndexed { i, chip ->
+                chip.background = GradientDrawable().apply {
+                    cornerRadius = dp(10).toFloat()
+                    setColor(Color.parseColor(if (i == index) C_ACCENT else C_SURFACE))
+                }
+                chip.setTextColor(Color.parseColor(if (i == index) "#FFFFFF" else C_INK))
+            }
+        }
+        val group = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        labels.forEachIndexed { i, label ->
+            val chip = TextView(this).apply {
+                text = label
+                textSize = 14f
+                gravity = Gravity.CENTER
+                typeface = Typeface.DEFAULT_BOLD
+                setOnClickListener {
+                    paint(i)
+                    onSelect(i)
+                }
+            }
+            chips.add(chip)
+            group.addView(
+                chip,
+                LinearLayout.LayoutParams(0, dp(44), 1f).apply {
+                    if (i > 0) marginStart = dp(8)
+                },
+            )
+        }
+        paint(selected)
+        return group
+    }
+
+    /** Icon + label with a platform Switch on the right. */
+    private fun switchRow(
+        iconRes: Int,
+        label: String,
+        checked: Boolean,
+        onChange: (Boolean) -> Unit,
+    ): LinearLayout =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -119,7 +204,17 @@ class MainActivity : Activity() {
                     marginStart = dp(10)
                 },
             )
-            addView(spinner, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(
+                Switch(this@MainActivity).apply {
+                    isChecked = checked
+                    contentDescription = label
+                    setOnCheckedChangeListener { _, value -> onChange(value) }
+                },
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
         }
 
     private fun paintButton(button: Button, filled: Boolean, iconRes: Int) {
@@ -148,15 +243,38 @@ class MainActivity : Activity() {
     private fun setStatus(text: String, error: Boolean = false) {
         statusLabel.text = text
         statusLabel.setTextColor(Color.parseColor(if (error) C_ERROR else C_MUTED))
+        statusDot.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.parseColor(if (error) C_ERROR else C_ACCENT))
+        }
     }
 
-    private fun addCard(root: LinearLayout, view: View) {
+    /**
+     * Adds a step card and, unless it is the last one, a short timeline line under its number so
+     * the three steps read as a sequence instead of three disconnected boxes.
+     */
+    private fun addStep(root: LinearLayout, card: View, last: Boolean) {
         root.addView(
-            view,
+            card,
             ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
         )
-        val spacer = View(this)
-        root.addView(spacer, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(14)))
+        if (last) {
+            root.addView(View(this), ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(14)))
+        } else {
+            val line = View(this).apply { setBackgroundColor(Color.parseColor(C_BORDER)) }
+            root.addView(line, LinearLayout.LayoutParams(dp(2), dp(14)).apply { marginStart = dp(50) })
+        }
+    }
+
+    private fun cardGap(): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+
+    /** One primary button that changes with state: green Start with a play glyph, outlined Stop. */
+    private fun setMirroring(on: Boolean) {
+        mirroring = on
+        if (!::primaryButton.isInitialized) return
+        primaryButton.text = if (on) "Stop mirroring" else "Start mirroring"
+        paintButton(primaryButton, !on, if (on) R.drawable.ic_stop else R.drawable.ic_play)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -168,13 +286,22 @@ class MainActivity : Activity() {
             setPadding(dp(20), dp(18), dp(20), dp(24))
         }
 
-        // Header
+        // Header: brand mark on a soft squircle, title and one-line promise.
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(
-                ImageView(this@MainActivity).apply { setImageResource(R.drawable.ic_logo) },
-                LinearLayout.LayoutParams(dp(44), dp(44)),
+                ImageView(this@MainActivity).apply {
+                    setImageResource(R.drawable.ic_logo)
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(14).toFloat()
+                        setColor(Color.parseColor(C_SURFACE))
+                    }
+                    setPadding(dp(10), dp(10), dp(10), dp(10))
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                },
+                LinearLayout.LayoutParams(dp(48), dp(48)),
             )
             addView(
                 LinearLayout(this@MainActivity).apply {
@@ -206,12 +333,12 @@ class MainActivity : Activity() {
 
         // Step 1: find the laptop
         val laptopCard = card().apply {
-            addView(stepHead(R.drawable.ic_laptop, "1", "Find your laptop"))
+            addView(stepHead("1", R.drawable.ic_laptop, "Find your laptop"))
             laptopStatus = TextView(this@MainActivity).apply {
                 text = "Not found yet. Start the receiver on your laptop first."
                 textSize = 14f
                 setTextColor(Color.parseColor(C_MUTED))
-                setPadding(0, dp(8), 0, dp(10))
+                setPadding(0, dp(10), 0, dp(12))
             }
             addView(laptopStatus)
             val find = Button(this@MainActivity).apply {
@@ -221,11 +348,11 @@ class MainActivity : Activity() {
             paintButton(find, true, R.drawable.ic_search)
             addView(find, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
-        addCard(root, laptopCard)
+        addStep(root, laptopCard, last = false)
 
         // Step 2: pairing code
         val codeCard = card().apply {
-            addView(stepHead(R.drawable.ic_key, "2", "Enter the pairing code"))
+            addView(stepHead("2", R.drawable.ic_key, "Enter the pairing code"))
             codeField = EditText(this@MainActivity).apply {
                 hint = "e.g. H5T2"
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
@@ -234,7 +361,7 @@ class MainActivity : Activity() {
                 typeface = Typeface.MONOSPACE
                 letterSpacing = 0.3f
                 gravity = Gravity.CENTER
-                textSize = 24f
+                textSize = 26f
                 setTextColor(Color.parseColor(C_INK))
                 background = GradientDrawable().apply {
                     cornerRadius = dp(12).toFloat()
@@ -243,88 +370,112 @@ class MainActivity : Activity() {
                 }
                 setPadding(dp(14), dp(14), dp(14), dp(14))
             }
-            addView(codeField, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(
+                codeField,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = dp(6) },
+            )
             addView(
                 TextView(this@MainActivity).apply {
                     text = "Four characters, shown on your laptop."
                     textSize = 12f
                     setTextColor(Color.parseColor(C_MUTED))
+                    gravity = Gravity.CENTER
                     setPadding(0, dp(8), 0, 0)
                 },
             )
         }
-        addCard(root, codeCard)
+        addStep(root, codeCard, last = false)
 
-        // Step 3: options
-        qualityField = spinnerFor(listOf("1080p - 16 Mbps", "720p - 6 Mbps"))
-        shareField = spinnerFor(
-            if (Build.VERSION.SDK_INT >= 34) {
+        // Step 3: options — chips instead of dropdowns, a switch for audio.
+        val optionsCard = card().apply {
+            addView(stepHead("3", R.drawable.ic_settings, "Options"))
+
+            addView(optionLabel(R.drawable.ic_gauge, "Quality"), cardGap())
+            addView(
+                chipGroup(listOf("1080p · 16 Mbps", "720p · 6 Mbps"), qualityIndex) {
+                    qualityIndex = it
+                },
+                cardGap().apply { topMargin = dp(6) },
+            )
+
+            addView(optionLabel(R.drawable.ic_apps, "Share"), cardGap().apply { topMargin = dp(16) })
+            val shareLabels = if (Build.VERSION.SDK_INT >= 34) {
                 listOf("Whole screen", "One app")
             } else {
                 listOf("Whole screen")
-            },
-        )
-        audioField = spinnerFor(listOf("Internal audio on", "Internal audio off"))
-        val optionsCard = card().apply {
-            addView(stepHead(R.drawable.ic_settings, "3", "Options"))
-            val rows = listOf(
-                optionRow(R.drawable.ic_gauge, "Quality", qualityField),
-                optionRow(R.drawable.ic_apps, "Share", shareField),
-                optionRow(R.drawable.ic_volume, "Audio", audioField),
-            )
-            rows.forEachIndexed { index, row ->
-                addView(
-                    row,
-                    ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
-                )
-                if (index != rows.lastIndex) {
-                    val divider = View(this@MainActivity).apply {
-                        setBackgroundColor(Color.parseColor(C_BORDER))
-                    }
-                    addView(
-                        divider,
-                        ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)),
-                    )
-                }
             }
+            addView(
+                chipGroup(shareLabels, shareIndex) { shareIndex = it },
+                cardGap().apply { topMargin = dp(6) },
+            )
+
+            addView(
+                switchRow(R.drawable.ic_volume, "Internal audio", audioOn) { audioOn = it },
+                cardGap().apply { topMargin = dp(16) },
+            )
+
             addView(
                 TextView(this@MainActivity).apply {
                     text = "1080p is best effort. If the phone gets hot, use 720p."
                     textSize = 12f
                     setTextColor(Color.parseColor(C_MUTED))
-                    setPadding(0, dp(10), 0, 0)
+                    setPadding(0, dp(14), 0, 0)
                 },
             )
         }
-        addCard(root, optionsCard)
+        addStep(root, optionsCard, last = true)
 
-        // Actions
-        val connect = Button(this).apply {
+        // One primary action that changes with state: Start -> Stop.
+        primaryButton = Button(this).apply {
             text = "Start mirroring"
-            setOnClickListener { requestCapture() }
-        }
-        paintButton(connect, true, R.drawable.ic_play)
-        root.addView(connect, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54)))
-
-        val stop = Button(this).apply {
-            text = "Stop mirroring"
             setOnClickListener {
-                val intent = Intent(this@MainActivity, MirrorService::class.java)
-                    .setAction(MirrorService.ACTION_STOP)
-                startService(intent)
-                setStatus("Stopped.")
+                if (mirroring) {
+                    val intent = Intent(this@MainActivity, MirrorService::class.java)
+                        .setAction(MirrorService.ACTION_STOP)
+                    startService(intent)
+                    setMirroring(false)
+                    setStatus("Stopped.")
+                } else {
+                    requestCapture()
+                }
             }
         }
-        paintButton(stop, false, R.drawable.ic_stop)
-        root.addView(stop, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54)))
+        paintButton(primaryButton, true, R.drawable.ic_play)
+        root.addView(primaryButton, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
 
-        statusLabel = TextView(this).apply {
-            text = "Start the receiver on your laptop, then find it here."
-            textSize = 14f
-            setTextColor(Color.parseColor(C_MUTED))
-            setPadding(0, dp(16), 0, 0)
+        // Status line: a state dot plus one clear next step.
+        val statusRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            statusDot = View(this@MainActivity).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.parseColor(C_ACCENT))
+                }
+            }
+            addView(statusDot, LinearLayout.LayoutParams(dp(8), dp(8)))
+            statusLabel = TextView(this@MainActivity).apply {
+                text = "Start the receiver on your laptop, then find it here."
+                textSize = 14f
+                setTextColor(Color.parseColor(C_MUTED))
+            }
+            addView(
+                statusLabel,
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    marginStart = dp(8)
+                },
+            )
         }
-        root.addView(statusLabel, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        root.addView(
+            statusRow,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(16) },
+        )
 
         val scroll = ScrollView(this).apply { addView(root) }
         // Content must clear the status bar: with targetSdk 35 Android 15 draws edge-to-edge, so
@@ -355,14 +506,6 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun spinnerFor(items: List<String>): Spinner = Spinner(this).apply {
-        adapter = ArrayAdapter(
-            this@MainActivity,
-            android.R.layout.simple_spinner_dropdown_item,
-            items,
-        )
-    }
-
     private fun requestCapture() {
         val host = selectedHost
         val code = normalizeCode(codeField.text.toString())
@@ -375,8 +518,8 @@ class MainActivity : Activity() {
             setStatus("The pairing code has 4 letters or digits.", error = true)
             return
         }
-        val quality = qualityField.selectedItemPosition
-        val audio = audioField.selectedItemPosition == 0
+        val quality = qualityIndex
+        val audio = audioOn
         pending = Pending(
             host = host,
             port = selectedPort,
@@ -387,7 +530,7 @@ class MainActivity : Activity() {
             audio = audio,
         )
         val manager = getSystemService(MediaProjectionManager::class.java)
-        val shareApp = Build.VERSION.SDK_INT >= 34 && shareField.selectedItemPosition == 1
+        val shareApp = Build.VERSION.SDK_INT >= 34 && shareIndex == 1
         AppLog.line(
             if (shareApp) "Requesting permission to share one app"
             else "Requesting screen and playback capture permission",
@@ -428,6 +571,7 @@ class MainActivity : Activity() {
             putExtra(MirrorService.EXTRA_RESULT_DATA, data)
         }
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+        setMirroring(true)
         setStatus("Mirroring started. You can leave this app.")
         AppLog.line("Capture approved, starting the service")
         moveTaskToBack(true)

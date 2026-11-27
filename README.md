@@ -9,7 +9,8 @@ Read `PRD.md` for scope and `docs/PROTOCOL.md` for the wire format.
 ## Download
 
 - APK: [viewgo-debug.apk](https://github.com/devkecelup/viewgo/releases/latest/download/viewgo-debug.apk)
-- Windows receiver: [viewgo-receiver.exe](https://github.com/devkecelup/viewgo/releases/latest/download/viewgo-receiver.exe)
+- Windows receiver (installer, recommended): [ViewGo-Setup.exe](https://github.com/devkecelup/viewgo/releases/latest/download/ViewGo-Setup-0.3.7.exe)
+- Windows receiver (portable exe): [viewgo-receiver.exe](https://github.com/devkecelup/viewgo/releases/latest/download/viewgo-receiver.exe)
 
 ## What works now
 
@@ -59,6 +60,14 @@ cargo build --release
 # binary: receiver/target/release/viewgo-receiver.exe
 ```
 
+Installer (Inno Setup 6, compiles the standalone exe into a setup program):
+
+```powershell
+# ISCC.exe comes with Inno Setup 6; winget install JRSoftware.InnoSetup
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\viewgo.iss
+# output: dist/ViewGo-Setup-<version>.exe
+```
+
 Android APK (JDK 17 + Android SDK 35):
 
 ```powershell
@@ -69,11 +78,12 @@ cd android
 
 ## Run
 
-1. Start `viewgo-receiver.exe` (optionally `viewgo-receiver.exe 47810`). It prints the laptop
-  pairing code. Allow it on your Windows private network when Firewall asks.
+1. Run `ViewGo-Setup-<version>.exe` (or start the portable `viewgo-receiver.exe`, optionally with a
+   port like `viewgo-receiver.exe 47810`). It prints the laptop pairing code. Allow it on your
+   Windows private network when Firewall asks.
 2. Install the APK on the phone and open **ViewGo**.
-3. Tap **Find laptop**, enter the pairing code, pick 1080p or 720p, and choose **Share the whole
-   screen** or (Android 14+) **Share one app**. Press **Connect**.
+3. Tap **Find laptop**, enter the pairing code, pick 1080p or 720p, choose **Whole screen** or
+   (Android 14+) **One app**, and toggle internal audio. Press **Start mirroring**.
 4. Allow screen capture when Android asks.
 5. Stop with **Stop mirroring** in the app or the notification action.
 

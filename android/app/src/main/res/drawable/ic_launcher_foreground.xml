@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Launcher foreground for the adaptive icon: the same white screen glyph the app uses in its
+     header, sized to sit inside the 66dp safe zone so every launcher mask (circle, squircle,
+     teardrop) crops nothing. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M34,34h40a5,5 0 0 1 5,5v22a5,5 0 0 1 -5,5H34a5,5 0 0 1 -5,-5V39a5,5 0 0 1 5,-5z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M45,71h18v4H45z" />
+</vector>
