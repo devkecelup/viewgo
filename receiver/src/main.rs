@@ -1436,7 +1436,7 @@ impl eframe::App for ViewGoApp {
                         card(ui, |ui| {
                             ui.label(egui::RichText::new("Session").size(12.0).color(MUTED));
                             ui.add_space(7.0);
-                            ui.horizontal(|ui| {
+                            ui.horizontal_top(|ui| {
                                 let (dot, _) = ui.allocate_exact_size(
                                     egui::vec2(8.0, 8.0),
                                     egui::Sense::hover(),
@@ -1447,7 +1447,17 @@ impl eframe::App for ViewGoApp {
                                     if active { ACCENT } else { FAINT },
                                 );
                                 ui.add_space(6.0);
-                                ui.label(egui::RichText::new(&status).size(13.0).color(INK));
+                                // Fixed two-line slot: the live counters change width every
+                                // second, so an autosizing block would bounce the cards below.
+                                let width = ui.available_width();
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(width, 0.0),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| {
+                                        ui.set_min_height(36.0);
+                                        ui.label(egui::RichText::new(&status).size(13.0).color(INK));
+                                    },
+                                );
                             });
                             if active {
                                 ui.add_space(12.0);
@@ -1682,7 +1692,12 @@ fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         .stroke(egui::Stroke::new(1.0, BORDER))
         .corner_radius(egui::CornerRadius::same(12))
         .inner_margin(egui::Margin::same(16))
-        .show(ui, add);
+        .show(ui, |ui| {
+            // A live session status changes width every second; wrapping it here keeps each
+            // card inside its column instead of widening the panel and shifting the layout.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+            add(ui);
+        });
     ui.add_space(12.0);
 }
 

@@ -4,7 +4,7 @@
 ; Optional: /DMyAppVersion=x.y.z to override the version below.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.4.0"
+  #define MyAppVersion "0.4.1"
 #endif
 
 #define MyAppName "ViewGo"
