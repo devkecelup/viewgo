@@ -956,8 +956,8 @@ fn mirror_viewport() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("viewgo-mirror")
 }
 
-/// Coverage ratios of the brand mark, shared with the Android launcher icon and
-/// tools/make_icon.ps1 so every surface draws the same shape.
+/// Coverage ratios of the brand mark, shared with the Android launcher icon so every
+/// surface draws the same shape.
 fn icon_inside_tile(x: f32, y: f32) -> bool {
     const PAD: f32 = 0.0625;
     const R: f32 = 0.175;
@@ -965,7 +965,7 @@ fn icon_inside_tile(x: f32, y: f32) -> bool {
 }
 
 fn icon_inside_screen(x: f32, y: f32) -> bool {
-    // Matches tools/make_icon.ps1: screen is 0.58 x 0.40 of the tile, centred, top at 0.29.
+    // Brand geometry: screen is 0.58 x 0.40 of the tile, centred, top at 0.29.
     let tile = 0.875;
     let sw = tile * 0.58;
     let sh = tile * 0.40;

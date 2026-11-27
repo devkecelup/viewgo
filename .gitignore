@@ -3,6 +3,7 @@
 .taste-skill/
 AGENTS.md
 PRD.md
+tools/make_icon.ps1
 
 # Build output
 target/
