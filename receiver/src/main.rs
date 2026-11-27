@@ -218,7 +218,14 @@ fn main() {
         thread::spawn(move || accept_loop(listener, shared, latest, spares, frame_seq));
     }
 
-    run_gui(shared, latest, spares, frame_seq, port, primary_ipv4(&addresses));
+    run_gui(
+        shared,
+        latest,
+        spares,
+        frame_seq,
+        port,
+        primary_ipv4(&addresses),
+    );
 }
 
 fn accept_loop(
@@ -813,11 +820,7 @@ impl FfmpegBuilder {
         let (sender, receiver) = std::sync::mpsc::sync_channel::<Vec<u8>>(4);
         let writer = thread::spawn(move || {
             while let Ok(pcm) = receiver.recv() {
-                if stdin
-                    .write_all(&pcm)
-                    .and_then(|_| stdin.flush())
-                    .is_err()
-                {
+                if stdin.write_all(&pcm).and_then(|_| stdin.flush()).is_err() {
                     break;
                 }
             }
@@ -929,7 +932,9 @@ fn run_gui(
     if let Err(error) = eframe::run_native(
         "ViewGo",
         options,
-        Box::new(move |cc| ViewGoApp::init(cc, shared, latest, spares, frame_seq, port, local_ipv4)),
+        Box::new(move |cc| {
+            ViewGoApp::init(cc, shared, latest, spares, frame_seq, port, local_ipv4)
+        }),
     ) {
         log(format!("Cannot open window: {error}"));
     }
@@ -1308,7 +1313,11 @@ impl eframe::App for ViewGoApp {
                 ui.add_space(10.0);
                 match local_ipv4 {
                     Some(ip) => {
-                        ui.label(egui::RichText::new("Laptop address").size(12.0).color(MUTED));
+                        ui.label(
+                            egui::RichText::new("Laptop address")
+                                .size(12.0)
+                                .color(MUTED),
+                        );
                         ui.label(
                             egui::RichText::new(format!("{ip}:{port}"))
                                 .monospace()
@@ -1387,9 +1396,11 @@ impl eframe::App for ViewGoApp {
                         .color(INK),
                 );
                 ui.label(
-                    egui::RichText::new("2.  Tap the search icon, or type the laptop address above.")
-                        .size(14.0)
-                        .color(INK),
+                    egui::RichText::new(
+                        "2.  Tap the search icon, or type the laptop address above.",
+                    )
+                    .size(14.0)
+                    .color(INK),
                 );
                 ui.label(
                     egui::RichText::new("3.  Type the code above, then Connect.")
@@ -1665,9 +1676,7 @@ fn local_ipv4_addresses() -> Vec<Ipv4Addr> {
         .into_iter()
         .filter(|interface| !interface.is_loopback())
         .filter_map(|interface| match interface.addr {
-            if_addrs::IfAddr::V4(v4)
-                if !v4.ip.is_unspecified() && !v4.ip.is_link_local() =>
-            {
+            if_addrs::IfAddr::V4(v4) if !v4.ip.is_unspecified() && !v4.ip.is_link_local() => {
                 Some(v4.ip)
             }
             _ => None,
