@@ -286,67 +286,39 @@
 
 <br>
 
-## What works now
+## How it works
 
 ### Finding and pairing
 
-- **Two paths in Step 1**: tap **Search laptop** for DNS-SD/mDNS discovery on the same Wi-Fi, or
-  type the laptop's IPv4 address (and optionally `:port`) in **Laptop IP address (optional)**. The
-  last used address is remembered.
-- Discovery runs one scan at a time with an **8-second deadline**; if nothing answers it stops and
-  points at the manual IP field instead of spinning. The receiver advertises IPv4 only, matching
-  the IPv4 socket it listens on.
-- The ViewGo window shows the laptop address (for example `192.168.18.69:47810`) for manual entry
-  when mDNS is blocked by the router or Windows Firewall.
-- The temporary 4-character pairing code lives 120 s, works once, and is rate limited per device
-  address. **AES-256-GCM** stream, key derived from the code with PBKDF2; the code itself is never
-  sent.
+- **Two paths:** **Search laptop** runs one mDNS scan with an **8-second deadline**; if nothing
+  answers, type the IPv4 address (and optional `:port`) in **Laptop IP address (optional)**. The
+  last address is remembered. IPv4 only, matching the receiver's socket.
+- **Pairing:** a 4-character code that lives 120 s, works once and is rate limited per device
+  address; approved on the laptop. **AES-256-GCM**, key derived from the code with PBKDF2 — the
+  code itself is never sent.
 
 ### Video
 
-- Android `MediaProjection` capture with the required consent dialog and foreground notification.
-- H.264 at 30 or 60 fps, chosen on the phone: 1080p16 / 1080p24 Mbps at 30 / 60 fps, or 720p6 /
-  720p10 Mbps. The short side follows the quality choice and the long side keeps the phone's native
-  proportions (1080x2400 stays 1080x2400), falling back to 720p if the encoder or capture surface
-  cannot start. The phone's encoder is the cap: if it cannot hold the chosen rate it logs
-  `encoder N fps (target ...)` and the laptop shows that lower rate as `in fps`.
-- Rotating the phone swaps only the encoder surface on the same virtual display (Android allows one
-  `createVirtualDisplay` per projection), so portrait/landscape rotation keeps the session running.
-- Android 14+ can share only one chosen app instead of the whole screen; earlier versions share the
-  whole screen.
+- H.264 from the phone's hardware encoder at **30 or 60 fps**: 1080p16 / 1080p24 Mbps, or
+  720p6 / 720p10 Mbps. Native proportions are kept (1080x2400 stays 1080x2400); 720p is the
+  automatic fallback when the encoder cannot start, and the phone logs the rate it really holds
+  (`encoder N fps`).
+- Rotation swaps only the encoder surface, so the session survives portrait/landscape. Android 14+
+  can share **one app** instead of the whole screen.
 
-### Audio
+### Audio and the laptop windows
 
-- Optional internal media/game audio streams over the encrypted session; enable it on the phone,
-  and install `ffplay` on Windows. Android or an individual app may block playback capture. An
-  **Audio** slider in the ViewGo window sets the laptop playback volume (0–100 %, default 70 %) and
-  applies live; 0 % is mute. Audio never blocks video: if playback falls behind, audio chunks are
-  dropped instead of stalling the picture.
+- Optional internal audio over the same encrypted session (needs `ffplay`); an **Audio** slider
+  sets the laptop volume live (default 70 %). Late audio is dropped, never stalling video.
+- **ViewGo** window: code, status, `in / dec / draw fps`, log, OBS *Borderless mirror window*
+  toggle. **ViewGo Mirror** window: the picture only, auto-sized to the stream.
 
-### Laptop windows
+### Delay and stopping
 
-- The laptop opens two native windows (white/green theme): **ViewGo** holds the pairing code, live
-  status, measured resolution/frame rate (`in / dec / draw fps`), the log panel and how-to-connect,
-  and **ViewGo Mirror** carries only the picture. The mirror window auto-sizes to the stream's
-  aspect (720 px tall, width follows the share screen) so the picture fills it with no black bars,
-  and it is movable/maximizable like a normal window.
-- An **OBS capture** card in ViewGo has a *Borderless mirror window* toggle for a clean window
-  capture — toggling recreates that window.
-
-### Delay and logging
-
-- Delay is bounded instead of queued: the phone keeps at most two frames in flight, drops the
-  oldest (then requests a fresh keyframe) rather than building up delay, and logs `encode delay
-  X ms` / `send blocked X ms` / `dropped N frames`; the laptop shows `in / dec / draw fps` so a
-  slow phone, a stalled link and a stalled display can be told apart at a glance. End-to-end
-  milliseconds still need a measurement on real hardware.
-- Phone log is shown on the laptop (log panel and `phone: ...`); the Android app keeps its log
-  screen-free and only streams it over the encrypted connection.
-
-### Stopping
-
-- Stop from the phone app, the notification, or the laptop (Quit / close window), or by revoking
-  capture.
+- At most **two frames in flight**; the oldest is dropped and a fresh keyframe requested, so delay
+  stays bounded. The phone logs `encode delay` / `send blocked` / `dropped`.
+- Stop from the phone app, the notification, the laptop window, or by revoking capture. The phone
+  log streams to the laptop over the encrypted session.
 
 <br>
 
@@ -356,155 +328,99 @@
 
 ## Requirements
 
-- Windows laptop with Rust (MSVC toolchain), `ffmpeg` and `ffplay` on `PATH` (or set `FFMPEG` /
-  `FFPLAY` to their exe).
-- Android 10+ phone, and the APK installed (sideload is fine).
-- Both devices on the same Wi-Fi network; the laptop must allow the receiver port through Windows
-  Firewall (the first run normally prompts).
+- Windows with Rust (MSVC), `ffmpeg` and `ffplay` on `PATH` (or set `FFMPEG` / `FFPLAY`).
+- Android 10+ phone with the APK sideloaded; both devices on the same Wi-Fi.
+- Allow the receiver port through Windows Firewall on first run.
 
 <br>
 
 ## Build
 
-Receiver:
-
 ```powershell
-cd receiver
-cargo build --release
-# binary: receiver/target/release/viewgo-receiver.exe
+# Windows receiver
+cd receiver; cargo build --release          # receiver/target/release/viewgo-receiver.exe
+
+# Installer (Inno Setup 6), back at the repo root
+cd ..; & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\viewgo.iss   # dist/ViewGo-Setup-<version>.exe
+
+# Android APK (JDK 17+, Android SDK 35)
+cd android; .\gradlew.bat assembleDebug     # app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Installer (Inno Setup 6, compiles the standalone exe into a setup program):
-
-```powershell
-# ISCC.exe comes with Inno Setup 6; winget install JRSoftware.InnoSetup
-& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\viewgo.iss
-# output: dist/ViewGo-Setup-<version>.exe
-```
-
-Brand artwork (launcher preview, wizard images at the fixed Inno sizes 76x76 / 164x314, and the
-exe icon) all comes from one geometry in `tools/make_icon.ps1`; re-run it after changing the logo:
-
-```powershell
-powershell -File tools\make_icon.ps1
-```
-
-Android APK (JDK 17 or newer — JDK 21 is fine — and Android SDK 35):
-
-```powershell
-cd android
-# Once, if Android Studio did not create it: point Gradle at the SDK
-"sdk.dir=C\:\\<your profile>\\AppData\\Local\\Android\\Sdk" | Set-Content local.properties
-$env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot"
-.\gradlew.bat assembleDebug
-# APK: android/app/build/outputs/apk/debug/app-debug.apk
-
-# install it on a connected phone
-& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" install -r app\build\outputs\apk\debug\app-debug.apk
-```
-
-The debug APK is signed with the debug key, so it installs by sideload. `assembleRelease` produces
-an **unsigned** APK (no `signingConfig` in `app/build.gradle.kts`), which Android will refuse to
-install until you add a keystore.
+The debug APK is signed with the debug key, so it sideloads. `assembleRelease` is unsigned until
+you add a keystore.
 
 <br>
 
 ## Run
 
-1. Run `ViewGo-Setup-<version>.exe` (or start the portable `viewgo-receiver.exe`, optionally with a
-   port like `viewgo-receiver.exe 47810`). It shows the laptop pairing code and the laptop's IPv4
-   address. Allow it on your Windows private network when Firewall asks.
-2. Install the APK on the phone and open **ViewGo**.
-3. Tap **Search laptop** (or type the laptop's IPv4 address in **Laptop IP address**), enter the
-   pairing code, pick 1080p or 720p, choose **Whole screen** or (Android 14+) **One app**, and
-   toggle internal audio. Press **Start mirroring**.
-4. Allow screen capture when Android asks. Use the **Audio** slider in the ViewGo window to set how
-   loud the phone's sound plays on the laptop.
-5. Stop with **Stop mirroring** in the app or the notification action.
+1. Start `ViewGo-Setup-<version>.exe` (or `viewgo-receiver.exe [port]`). It shows the pairing code
+   and the laptop's IPv4 address; allow it on your private network.
+2. Install the APK and open **ViewGo**.
+3. **Search laptop** (or type the IP), enter the code, pick quality and share target, press
+   **Start mirroring**.
+4. Allow screen capture when Android asks.
+5. Stop from the app or the notification.
 
-Keep the phone unlocked while mirroring; capture of protected content (banking apps, DRM video)
-shows black by Android design.
+Keep the phone unlocked; protected content (banking, DRM) shows black by Android design.
 
 <br>
 
 ## Tests
 
 ```powershell
-cd receiver
-cargo test                 # crypto, framing, pairing policy
-cargo run --example vector # crypto vector asserted by the Android unit test
-
-cd android
-.\gradlew.bat testDebugUnitTest
+cd receiver; cargo test; cargo run --example vector
+cd ..\android; .\gradlew.bat testDebugUnitTest
 ```
 
-`receiver/examples/send_sim.rs` replays a real H.264 file through the live handshake so the full
-receiver path can be checked without a phone:
+`receiver/examples/send_sim.rs` replays an H.264 file through the real handshake, so the receiver
+can be exercised without a phone:
 
 ```powershell
-cargo run --example send_sim -- 127.0.0.1 47810 <pairing code> sample.h264 1080 1920
-# add more <file> <width> <height> triples to replay a rotation mid-session
+cargo run --example send_sim -- 127.0.0.1 47810 <code> sample.h264 1080 1920
 ```
 
 <br>
 
 ## Known limits
 
-- **End-to-end latency is not measured yet.** Only stage counters exist (`in / dec / draw fps`,
-  `encode delay`, `send blocked`). Do not compare with scrcpy's published 35–70 ms until a real
-  phone + laptop pair has been timed.
-- The receiver listens on IPv4 only and now advertises IPv4 addresses only, so it cannot serve an
-  IPv6-only network. If mDNS discovery is blocked (client isolation, VPN, firewall), type the
-  address shown in the ViewGo window in the phone's **Laptop IP** field; the app rejects IPv6
-  literals and host names.
-- No recording, multi-viewer, touch control, iOS, or cloud relay.
-- Rotation swaps the encoder and sends a new keyframe, which can cause a short pause (a fraction of
-  a second); the receiver restarts its decoder and keeps the window.
-- Sharpness is limited by the laptop window, not the stream: the capture is the phone's native
-  1080x2400, but a 9:20 phone drawn into a 1920x1080 laptop screen can only reach about 468x1040 px
-  (height-limited). Maximize the receiver window for the biggest, sharpest picture.
-- The decoder emits frames capped at 1080 px on the long side (so a 1080x2400 phone arrives as
-  486x1080 instead of ~10 MB per frame of raw pixels). That keeps the pipe and the laptop CPU
-  cheap enough for smooth video; a mirror window larger than 1080 px tall is upscaled and looks
-  slightly soft.
-- Games and apps that mark their window as secure (many banking apps and some DRM/game surfaces)
-  are captured as black by Android; that is the platform's protection, not a ViewGo bug.
-- Single-app capture requires Android 14+ and the **Share one app** option before opening the
-  system consent screen. If Android/OEM disables that option, ViewGo cannot override system policy.
-- Playback audio capture is best-effort. Apps that mark audio as non-capturable (often DRM/voice apps)
-  will stay silent by Android policy.
-- Software H.264 decode on the laptop through ffmpeg, with the GPU decoder (d3d11va on Windows)
-  used when the driver offers one; a hardware attempt that fails falls back to software for the rest
-  of the session. `VIEWGO_HWACCEL=0` forces software decode. Rendering is not GPU-accelerated beyond
-  the texture blit: the laptop scales each frame on the CPU. See `docs/PERFORMANCE.md` for the
-  measured numbers and what `in / dec / draw fps` means.
-- Quality adaptation is only the startup fallback to 720p. Bitrate does not change mid-session yet.
-- 1080p is best effort. A 4 GB phone that gets hot or drops frames should use 720p; for 60 fps,
-  720p is usually the mode that holds on a mid-range phone.
-- The pairing code is the only shared secret. At 4 characters (~1 million combinations) online
-  guessing stays impractical (120 s expiry, single use, 5 attempts per minute per address), but an
-  attacker already on your Wi-Fi who records the pairing handshake can try every code offline and
-  decrypt that session. Pair only on a network you trust.
+- **Latency is not measured end to end** — only stage counters exist. Don't compare it with
+  scrcpy's 35–70 ms until a real phone + laptop pair is timed.
+- **IPv4 only.** If mDNS is blocked, type the address shown in the ViewGo window; IPv6 literals
+  and host names are rejected.
+- **View-only by scope:** no recording, multi-viewer, touch control, iOS, or cloud relay.
+- **Rotation** swaps the encoder and sends a keyframe, causing a short pause.
+- **Sharpness is window-limited**, and frames are capped at 1080 px on the long side; a larger
+  mirror window is upscaled and slightly soft.
+- **Secure content is black** (banking, some DRM/games); single-app share needs Android 14+;
+  playback audio capture is best-effort and may stay silent.
+- **Decode** uses d3d11va when available and falls back to software (`VIEWGO_HWACCEL=0` forces it);
+  scaling runs on the CPU. Numbers live in `docs/PERFORMANCE.md`.
+- **1080p is best effort.** Quality falls back to 720p only at startup; bitrate does not adapt
+  mid-session.
+- **Pair only on a network you trust.** 4 characters (~1M) makes online guessing impractical, but
+  an attacker on your Wi-Fi who records the handshake can brute-force it offline.
+
+<br>
+
+---
 
 <br>
 
 ## Layout
 
 ```
-docs/PROTOCOL.md   wire format and handshake
+docs/PROTOCOL.md     wire format and handshake
 docs/PERFORMANCE.md  stage counters and measured numbers
-receiver/          Rust Windows receiver (ffmpeg decode + native egui window)
-android/           Kotlin capture/encode app (no AndroidX)
+receiver/            Rust receiver (ffmpeg decode + native egui window)
+android/             Kotlin capture/encode app (no AndroidX)
 ```
 
 <br>
 
 ## Comparison notes
 
-Scores are an assessment against the rubric above, not measurements; setup effort is judged from
-documented steps, not a stopwatch. scrcpy numbers come from its README v5.0.1
-(<https://github.com/Genymobile/scrcpy>, fetched 2026-11-27): 30–120 fps, 1920x1080+, 35–70 ms,
-~1 s to first frame, audio on Android 11+, no account, no internet required. Vysor, ApowerMirror,
-AirDroid Cast and Microsoft Phone Link were assessed from their product pages on 2026-11-27.
-Logos: ViewGo from `ic_logo.xml`, scrcpy from its repository (Apache-2.0), the rest are site
-favicons used only to identify the products.
+Scores are an assessment against the rubric above, not measurements. scrcpy figures come from its
+README v5.0.1 (fetched 2026-11-27); Vysor, ApowerMirror, AirDroid Cast and Phone Link were assessed
+from their product pages the same day. Logos: ViewGo from `ic_logo.xml`, scrcpy from its repo
+(Apache-2.0), the rest are site favicons used only to identify the products.
