@@ -19,7 +19,7 @@
 
 <p align="center">
   <sub>Rust receiver, Kotlin Android sender, H.264 through the phone's hardware encoder,<br>
-  decoded by ffmpeg on the laptop. Read <code>PRD.md</code> for scope and <code>docs/PROTOCOL.md</code> for the wire format.</sub>
+  decoded by ffmpeg on the laptop. Read <code>docs/PROTOCOL.md</code> for the wire format.</sub>
 </p>
 
 <br>

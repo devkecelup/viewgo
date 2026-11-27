@@ -1,6 +1,8 @@
 # Local tooling and state
 .opencode/
 .taste-skill/
+AGENTS.md
+PRD.md
 
 # Build output
 target/
