@@ -4,7 +4,8 @@ Mirror an Android phone's screen to a Windows laptop over the same Wi-Fi, with a
 encrypted video. Rust receiver, Kotlin Android sender, H.264 through the phone's hardware encoder,
 decoded by ffmpeg on the laptop.
 
-Read `PRD.md` for scope and `docs/PROTOCOL.md` for the wire format.
+Read `PRD.md` for scope and `docs/PROTOCOL.md` for the wire format. `docs/COMPARISON.md` lists
+the features and compares ViewGo against scrcpy and the commercial mirroring tools.
 
 ## Download
 
