@@ -940,14 +940,17 @@ fn run_gui(
     }
 }
 
-// Palette dealt by design-taste-frontend (`start.mjs brand --page software --bg #fff
-// --accent #0f7b4f --radius soft`): white ground, green action.
+// Palette from the desktop redesign (codelaptop.html): white ground, slate ink, emerald action.
 const BG: egui::Color32 = egui::Color32::from_rgb(0xff, 0xff, 0xff);
-const SURFACE: egui::Color32 = egui::Color32::from_rgb(0xf1, 0xf2, 0xf3);
-const BORDER: egui::Color32 = egui::Color32::from_rgb(0xe4, 0xe7, 0xeb);
-const INK: egui::Color32 = egui::Color32::from_rgb(0x10, 0x18, 0x28);
-const MUTED: egui::Color32 = egui::Color32::from_rgb(0x5f, 0x67, 0x72);
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x0f, 0x7b, 0x4f);
+const PAGE: egui::Color32 = egui::Color32::from_rgb(0xf8, 0xfa, 0xfc); // slate-50
+const SURFACE: egui::Color32 = egui::Color32::from_rgb(0xf1, 0xf5, 0xf9); // slate-100
+const BORDER: egui::Color32 = egui::Color32::from_rgb(0xe2, 0xe8, 0xf0); // slate-200
+const LINE: egui::Color32 = egui::Color32::from_rgb(0xcb, 0xd5, 0xe1); // slate-300
+const INK: egui::Color32 = egui::Color32::from_rgb(0x1e, 0x29, 0x3b); // slate-800
+const MUTED: egui::Color32 = egui::Color32::from_rgb(0x64, 0x74, 0x8b); // slate-500
+const FAINT: egui::Color32 = egui::Color32::from_rgb(0x94, 0xa3, 0xb8); // slate-400
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x05, 0x96, 0x69); // brand-600
+const ACCENT_DARK: egui::Color32 = egui::Color32::from_rgb(0x04, 0x78, 0x57); // brand-700
 const ACCENT_INK: egui::Color32 = egui::Color32::from_rgb(0xff, 0xff, 0xff);
 const DANGER: egui::Color32 = egui::Color32::from_rgb(0xb4, 0x23, 0x18); // same red as the Android Stop
 
@@ -1063,6 +1066,8 @@ struct ViewGoApp {
     recreate_in: u32,
     /// Throttles the "render is slow" log so a struggling laptop reports once per couple seconds.
     last_slow_render: Instant,
+    /// When the pairing code was last copied, so the copy glyph can flash a check.
+    copied_at: Option<Instant>,
 }
 
 impl ViewGoApp {
@@ -1122,6 +1127,7 @@ impl ViewGoApp {
             borderless: false,
             recreate_in: 0,
             last_slow_render: Instant::now(),
+            copied_at: None,
         }))
     }
 
@@ -1239,198 +1245,331 @@ impl eframe::App for ViewGoApp {
         let port = self.port;
         let local_ipv4 = self.local_ipv4;
 
-        egui::Panel::top("header").exact_size(60.0).show(ui, |ui| {
-            ui.horizontal_centered(|ui| {
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
-                paint_mark(ui.painter(), rect);
-                ui.add_space(10.0);
-                ui.label(egui::RichText::new("ViewGo").size(20.0).strong().color(INK));
-                ui.add_space(14.0);
-                badge(ui, active);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Quit").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                    ui.label(
-                        egui::RichText::new(format!("port {port}"))
-                            .size(13.0)
-                            .color(MUTED),
-                    );
+        // Header: brand tile, live state pill, port chip and Quit.
+        egui::Panel::top("header")
+            .exact_size(64.0)
+            .frame(
+                egui::Frame::NONE
+                    .fill(BG)
+                    .inner_margin(egui::Margin::symmetric(24, 0)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(36.0, 36.0), egui::Sense::hover());
+                    paint_mark(ui.painter(), rect);
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new("ViewGo").size(20.0).strong().color(INK));
+                    ui.add_space(18.0);
+                    state_pill(ui, active);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let quit =
+                            egui::Button::new(egui::RichText::new("Quit").size(12.0).color(INK))
+                                .fill(SURFACE)
+                                .stroke(egui::Stroke::new(1.0, BORDER))
+                                .corner_radius(8)
+                                .min_size(egui::vec2(58.0, 30.0));
+                        if ui.add(quit).clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        ui.add_space(10.0);
+                        mono_chip(ui, &format!("port {port}"), false);
+                    });
                 });
+                let bounds = ui.max_rect();
+                ui.painter().line_segment(
+                    [bounds.left_bottom(), bounds.right_bottom()],
+                    egui::Stroke::new(1.0, BORDER),
+                );
             });
-        });
 
+        // Log: a titled console strip pinned to the bottom, as in the redesign.
         egui::Panel::bottom("log")
             .resizable(true)
-            .default_size(150.0)
-            .min_size(90.0)
+            .default_size(190.0)
+            .min_size(110.0)
+            .frame(
+                egui::Frame::NONE
+                    .fill(BG)
+                    .inner_margin(egui::Margin::symmetric(20, 12)),
+            )
             .show(ui, |ui| {
-                ui.add_space(6.0);
+                let bounds = ui.max_rect();
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(bounds.left(), bounds.top() - 12.0),
+                        egui::pos2(bounds.right(), bounds.top() - 12.0),
+                    ],
+                    egui::Stroke::new(1.0, BORDER),
+                );
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Log").size(12.0).color(MUTED));
+                    ui.label(egui::RichText::new("Log").size(12.0).strong().color(INK));
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new("(Realtime receiver activity)")
+                            .monospace()
+                            .size(11.0)
+                            .color(FAINT),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
                             egui::RichText::new("phone logs and receiver events")
                                 .size(11.0)
-                                .color(MUTED),
+                                .color(FAINT),
                         );
                     });
                 });
-                ui.add_space(2.0);
-                egui::ScrollArea::vertical()
-                    .stick_to_bottom(true)
-                    .auto_shrink([false, false])
+                ui.add_space(8.0);
+                egui::Frame::NONE
+                    .fill(PAGE)
+                    .corner_radius(10)
+                    .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
-                        for line in log_lines() {
-                            ui.label(
-                                egui::RichText::new(line)
-                                    .monospace()
-                                    .size(12.0)
-                                    .color(MUTED),
-                            );
-                        }
+                        egui::ScrollArea::vertical()
+                            .stick_to_bottom(true)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for line in log_lines() {
+                                    let colour = if line.starts_with("Pairing code") {
+                                        ACCENT_DARK
+                                    } else if line.starts_with("phone:") {
+                                        FAINT
+                                    } else {
+                                        MUTED
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(line)
+                                            .monospace()
+                                            .size(12.0)
+                                            .color(colour),
+                                    );
+                                }
+                            });
                     });
             });
 
-        egui::Panel::right("side").exact_size(334.0).show(ui, |ui| {
-            card(ui, |ui| {
-                ui.label(egui::RichText::new("Pairing code").size(13.0).color(MUTED));
-                ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new(code)
-                        .monospace()
-                        .size(54.0)
-                        .strong()
-                        .color(INK),
-                );
-                ui.add_space(2.0);
-                ui.label(
-                    egui::RichText::new("Valid 120 seconds, single use")
-                        .size(12.0)
-                        .color(MUTED),
-                );
-                ui.add_space(10.0);
-                match local_ipv4 {
-                    Some(ip) => {
-                        ui.label(
-                            egui::RichText::new("Laptop address")
+        // Sidebar: pairing code, session, audio, how-to and OBS cards, as in the redesign.
+        egui::Panel::right("side")
+            .exact_size(384.0)
+            .frame(
+                egui::Frame::NONE
+                    .fill(BG)
+                    .inner_margin(egui::Margin {
+                        left: 22,
+                        right: 22,
+                        top: 18,
+                        bottom: 18,
+                    }),
+            )
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        card(ui, |ui| {
+                            row_label(ui, "Pairing code", Some("Auto-refreshes"));
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(&code)
+                                        .monospace()
+                                        .size(54.0)
+                                        .strong()
+                                        .color(INK),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let copied = self.copied_at.map_or(false, |at| {
+                                            at.elapsed() < Duration::from_millis(1400)
+                                        });
+                                        let (rect, resp) = ui.allocate_exact_size(
+                                            egui::vec2(30.0, 30.0),
+                                            egui::Sense::click(),
+                                        );
+                                        let colour = if copied {
+                                            ACCENT
+                                        } else if resp.hovered() {
+                                            INK
+                                        } else {
+                                            FAINT
+                                        };
+                                        paint_copy(ui.painter(), rect.shrink(7.0), colour, copied);
+                                        if resp.clicked() {
+                                            ctx.copy_text(code.clone());
+                                            self.copied_at = Some(Instant::now());
+                                        }
+                                        resp.on_hover_text("Copy code");
+                                    },
+                                );
+                            });
+                            ui.label(
+                                egui::RichText::new("Valid 120 seconds, single use")
+                                    .size(12.0)
+                                    .color(FAINT),
+                            );
+                            ui.add_space(14.0);
+                            hairline(ui);
+                            ui.add_space(12.0);
+                            ui.label(egui::RichText::new("Laptop address").size(12.0).color(MUTED));
+                            ui.add_space(5.0);
+                            match local_ipv4 {
+                                Some(ip) => {
+                                    mono_chip(ui, &format!("{ip}:{port}"), true);
+                                    ui.add_space(6.0);
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Type this in the phone's Laptop IP field if search fails.",
+                                        )
+                                        .size(11.0)
+                                        .color(FAINT),
+                                    );
+                                }
+                                None => {
+                                    ui.label(
+                                        egui::RichText::new("No IPv4 address detected")
+                                            .size(12.0)
+                                            .color(DANGER),
+                                    );
+                                }
+                            }
+                        });
+                        card(ui, |ui| {
+                            ui.label(egui::RichText::new("Session").size(12.0).color(MUTED));
+                            ui.add_space(7.0);
+                            ui.horizontal(|ui| {
+                                let (dot, _) = ui.allocate_exact_size(
+                                    egui::vec2(8.0, 8.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().circle_filled(
+                                    dot.center(),
+                                    4.0,
+                                    if active { ACCENT } else { FAINT },
+                                );
+                                ui.add_space(6.0);
+                                ui.label(egui::RichText::new(&status).size(13.0).color(INK));
+                            });
+                            if active {
+                                ui.add_space(12.0);
+                                let stop = egui::Button::new(
+                                    egui::RichText::new("Stop sharing")
+                                        .strong()
+                                        .color(egui::Color32::WHITE),
+                                )
+                                .fill(DANGER)
+                                .corner_radius(8);
+                                if ui.add_sized([ui.available_width(), 34.0], stop).clicked() {
+                                    stop_session(&self.shared);
+                                }
+                            }
+                        });
+                        card(ui, |ui| {
+                            let mut volume = self.shared.volume.load(Ordering::Relaxed);
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("Audio").size(12.0).color(MUTED));
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        egui::Frame::NONE
+                                            .fill(SURFACE)
+                                            .corner_radius(5)
+                                            .inner_margin(egui::Margin::symmetric(6, 2))
+                                            .show(ui, |ui| {
+                                                ui.label(
+                                                    egui::RichText::new(format!("{volume}%"))
+                                                        .monospace()
+                                                        .size(11.0)
+                                                        .color(INK),
+                                                );
+                                            });
+                                    },
+                                );
+                            });
+                            ui.add_space(8.0);
+                            ui.spacing_mut().slider_width = ui.available_width();
+                            if ui
+                                .add(egui::Slider::new(&mut volume, 0..=100).show_value(false))
+                                .changed()
+                            {
+                                self.shared.volume.store(volume, Ordering::Relaxed);
+                            }
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new("Phone sound; changes apply while mirroring.")
+                                    .size(11.0)
+                                    .color(FAINT),
+                            );
+                        });
+                        card(ui, |ui| {
+                            ui.label(egui::RichText::new("How to connect").size(12.0).color(MUTED));
+                            ui.add_space(8.0);
+                            for (step, text) in [
+                                "Open ViewGo on your phone.",
+                                "Tap the search icon, or type the laptop address above.",
+                                "Type the code above, then Connect.",
+                            ]
+                            .iter()
+                            .enumerate()
+                            {
+                                ui.horizontal_top(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("{}.", step + 1))
+                                            .size(12.0)
+                                            .color(FAINT),
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.label(egui::RichText::new(*text).size(12.0).color(MUTED));
+                                });
+                                ui.add_space(6.0);
+                            }
+                        });
+                        card(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(16.0, 16.0),
+                                    egui::Sense::hover(),
+                                );
+                                paint_cam(ui.painter(), rect, FAINT);
+                                ui.add_space(6.0);
+                                ui.label(egui::RichText::new("OBS capture").size(12.0).color(INK));
+                            });
+                            ui.add_space(8.0);
+                            ui.label(
+                                egui::RichText::new(
+                                    "Add a Window Capture source in OBS pointing to the separate ViewGo Mirror window for zero-lag streaming.",
+                                )
                                 .size(12.0)
                                 .color(MUTED),
-                        );
-                        ui.label(
-                            egui::RichText::new(format!("{ip}:{port}"))
-                                .monospace()
-                                .size(14.0)
-                                .color(INK),
-                        );
-                        ui.label(
-                            egui::RichText::new(
-                                "Type this in the phone's Laptop IP field if search fails.",
-                            )
-                            .size(11.0)
-                            .color(MUTED),
-                        );
-                    }
-                    None => {
-                        ui.label(
-                            egui::RichText::new("No IPv4 address detected")
-                                .size(12.0)
-                                .color(DANGER),
-                        );
-                    }
-                }
+                            );
+                            ui.add_space(10.0);
+                            let mut borderless = self.borderless;
+                            if ui
+                                .checkbox(
+                                    &mut borderless,
+                                    egui::RichText::new("Borderless mirror window")
+                                        .size(12.0)
+                                        .color(INK),
+                                )
+                                .changed()
+                            {
+                                self.borderless = borderless;
+                                let _ = ctx.send_viewport_cmd_to(
+                                    mirror_viewport(),
+                                    egui::ViewportCommand::Close,
+                                );
+                                // Give the close a few frames before reopening with the new style.
+                                self.recreate_in = 3;
+                            }
+                            ui.label(
+                                egui::RichText::new(
+                                    "On: clean picture for OBS. Off: movable and maximizable.",
+                                )
+                                .size(11.0)
+                                .color(FAINT),
+                            );
+                        });
+                    });
             });
-            ui.add_space(14.0);
-            card(ui, |ui| {
-                ui.label(egui::RichText::new("Session").size(13.0).color(MUTED));
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new(status).size(15.0).color(INK));
-                if active {
-                    ui.add_space(10.0);
-                    if ui
-                        .add_sized(
-                            [ui.available_width(), 36.0],
-                            egui::Button::new(
-                                egui::RichText::new("Stop sharing")
-                                    .strong()
-                                    .color(egui::Color32::WHITE),
-                            )
-                            .fill(DANGER),
-                        )
-                        .clicked()
-                    {
-                        stop_session(&self.shared);
-                    }
-                }
-            });
-            ui.add_space(14.0);
-            card(ui, |ui| {
-                ui.label(egui::RichText::new("Audio").size(13.0).color(MUTED));
-                ui.add_space(6.0);
-                let mut volume = self.shared.volume.load(Ordering::Relaxed);
-                if ui
-                    .add(egui::Slider::new(&mut volume, 0..=100).suffix("%"))
-                    .changed()
-                {
-                    self.shared.volume.store(volume, Ordering::Relaxed);
-                }
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new("Phone sound; changes apply while mirroring.")
-                        .size(11.0)
-                        .color(MUTED),
-                );
-            });
-            ui.add_space(14.0);
-            card(ui, |ui| {
-                ui.label(
-                    egui::RichText::new("How to connect")
-                        .size(13.0)
-                        .color(MUTED),
-                );
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new("1.  Open ViewGo on your phone.")
-                        .size(14.0)
-                        .color(INK),
-                );
-                ui.label(
-                    egui::RichText::new(
-                        "2.  Tap the search icon, or type the laptop address above.",
-                    )
-                    .size(14.0)
-                    .color(INK),
-                );
-                ui.label(
-                    egui::RichText::new("3.  Type the code above, then Connect.")
-                        .size(14.0)
-                        .color(INK),
-                );
-            });
-            ui.add_space(14.0);
-            card(ui, |ui| {
-                ui.label(egui::RichText::new("OBS capture").size(13.0).color(MUTED));
-                ui.add_space(8.0);
-                let mut borderless = self.borderless;
-                if ui
-                    .checkbox(&mut borderless, "Borderless mirror window")
-                    .changed()
-                {
-                    self.borderless = borderless;
-                    let _ =
-                        ctx.send_viewport_cmd_to(mirror_viewport(), egui::ViewportCommand::Close);
-                    // Give the close a few frames before reopening with the new style.
-                    self.recreate_in = 3;
-                }
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new("On: clean picture for OBS. Off: movable and maximizable.")
-                        .size(12.0)
-                        .color(MUTED),
-                );
-            });
-        });
 
         // The picture lives in its own window: movable and maximizable by default, or borderless
         // for a clean OBS capture (toggle in the side panel; that recreates the native window).
@@ -1487,41 +1626,52 @@ impl eframe::App for ViewGoApp {
             .unwrap()
             .map(|t| t.elapsed().as_secs());
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.with_layout(
-                egui::Layout::centered_and_justified(egui::Direction::TopDown),
-                |ui| {
-                    ui.vertical_centered(|ui| {
-                        let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(460.0, 170.0), egui::Sense::hover());
-                        paint_flow(ui.painter(), rect);
-                        ui.add_space(26.0);
-                        ui.label(
-                            egui::RichText::new("The picture is in the ViewGo Mirror window")
-                                .size(24.0)
-                                .strong()
-                                .color(INK),
-                        );
-                        ui.add_space(14.0);
-                        ui.label(
-                            egui::RichText::new(
-                                "Point OBS at that window and show it fullscreen.\nThis window keeps the pairing code, session status and log.",
-                            )
-                            .size(15.0)
-                            .color(MUTED),
-                        );
-                        if let Some(secs) = since {
-                            ui.add_space(20.0);
-                            chip(
-                                ui,
-                                &format!("Session {:02}:{:02}", secs / 60, secs % 60),
-                                true,
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(PAGE))
+            .show(ui, |ui| {
+                ui.with_layout(
+                    egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                    |ui| {
+                        ui.vertical_centered(|ui| {
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(430.0, 190.0),
+                                egui::Sense::hover(),
                             );
-                        }
-                    });
-                },
-            );
-        });
+                            paint_flow(ui.painter(), rect);
+                            ui.add_space(22.0);
+                            ui.label(
+                                egui::RichText::new("The picture is in the ViewGo Mirror window")
+                                    .size(23.0)
+                                    .strong()
+                                    .color(INK),
+                            );
+                            ui.add_space(10.0);
+                            ui.label(
+                                egui::RichText::new(
+                                    "Point OBS at that window and show it fullscreen.\nThis window keeps the pairing code, session status and log.",
+                                )
+                                .size(14.0)
+                                .color(MUTED),
+                            );
+                            ui.add_space(18.0);
+                            if link_button(ui, "Bring Mirror Window to Front").clicked() {
+                                let _ = ctx.send_viewport_cmd_to(
+                                    mirror_viewport(),
+                                    egui::ViewportCommand::Focus,
+                                );
+                            }
+                            if let Some(secs) = since {
+                                ui.add_space(16.0);
+                                chip(
+                                    ui,
+                                    &format!("Session {:02}:{:02}", secs / 60, secs % 60),
+                                    true,
+                                );
+                            }
+                        });
+                    },
+                );
+            });
     }
 }
 
@@ -1533,15 +1683,85 @@ fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         .corner_radius(egui::CornerRadius::same(12))
         .inner_margin(egui::Margin::same(16))
         .show(ui, add);
-    ui.add_space(2.0);
+    ui.add_space(12.0);
 }
 
+/// Card header row: a muted label with an optional right-aligned mono hint.
+fn row_label(ui: &mut egui::Ui, label: &str, hint: Option<&str>) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(label).size(12.0).color(MUTED));
+        if let Some(hint) = hint {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new(hint).monospace().size(11.0).color(FAINT));
+            });
+        }
+    });
+}
+
+fn hairline(ui: &mut egui::Ui) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, BORDER);
+}
+
+/// Small mono chip for the port and the laptop address (emphasis darkens it).
+fn mono_chip(ui: &mut egui::Ui, text: &str, emphasis: bool) {
+    egui::Frame::NONE
+        .fill(if emphasis { SURFACE } else { PAGE })
+        .stroke(egui::Stroke::new(1.0, BORDER))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .show(ui, |ui| {
+            let text = egui::RichText::new(text)
+                .monospace()
+                .size(if emphasis { 13.0 } else { 12.0 })
+                .color(if emphasis { INK } else { MUTED });
+            ui.label(if emphasis { text.strong() } else { text });
+        });
+}
+
+/// Pill showing the live session state, as in the redesign's header.
+fn state_pill(ui: &mut egui::Ui, active: bool) {
+    let label = if active { "Mirroring" } else { "Waiting for a phone" };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), egui::FontId::proportional(12.0), MUTED);
+    let pad = egui::vec2(12.0, 6.0);
+    let size = egui::vec2(
+        pad.x * 2.0 + 8.0 + 6.0 + galley.size().x,
+        pad.y * 2.0 + galley.size().y.max(8.0),
+    );
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let radius = egui::CornerRadius::same((size.y / 2.0) as u8);
+    ui.painter().rect_filled(rect, radius, SURFACE);
+    ui.painter().rect_stroke(
+        rect,
+        radius,
+        egui::Stroke::new(1.0, BORDER),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().circle_filled(
+        egui::pos2(rect.left() + pad.x + 4.0, rect.center().y),
+        4.0,
+        if active { ACCENT } else { FAINT },
+    );
+    ui.painter().galley(
+        egui::pos2(
+            rect.left() + pad.x + 14.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        MUTED,
+    );
+}
+
+/// Mono chip with a rounded fill, used for the live session timer.
 fn chip(ui: &mut egui::Ui, label: &str, accent: bool) {
     let colour = if accent { ACCENT_INK } else { MUTED };
-    let galley =
-        ui.painter()
-            .layout_no_wrap(label.to_string(), egui::FontId::proportional(13.0), colour);
-    let pad = egui::vec2(13.0, 7.0);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), egui::FontId::monospace(12.0), colour);
+    let pad = egui::vec2(12.0, 5.0);
     let size = galley.size() + pad * 2.0;
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     ui.painter().rect_filled(
@@ -1552,20 +1772,128 @@ fn chip(ui: &mut egui::Ui, label: &str, accent: bool) {
     ui.painter().galley(rect.min + pad, galley, colour);
 }
 
-fn badge(ui: &mut egui::Ui, active: bool) {
-    chip(
-        ui,
-        if active {
-            "Mirroring"
-        } else {
-            "Waiting for a phone"
-        },
-        active,
+/// Bordered ghost button with an external-link glyph, like the redesign's stage action.
+fn link_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_string(), egui::FontId::proportional(12.0), INK);
+    let size = egui::vec2(32.0 + galley.size().x + 22.0, 34.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let radius = egui::CornerRadius::same(8);
+    ui.painter()
+        .rect_filled(rect, radius, if resp.hovered() { PAGE } else { BG });
+    ui.painter().rect_stroke(
+        rect,
+        radius,
+        egui::Stroke::new(1.0, if resp.hovered() { FAINT } else { LINE }),
+        egui::StrokeKind::Inside,
+    );
+    let icon = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 18.0, rect.center().y),
+        egui::vec2(13.0, 13.0),
+    );
+    paint_external(ui.painter(), icon, ACCENT);
+    ui.painter().galley(
+        egui::pos2(rect.left() + 32.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        INK,
+    );
+    resp
+}
+
+/// Two overlapping sheets; switches to a check right after a copy.
+fn paint_copy(painter: &egui::Painter, rect: egui::Rect, colour: egui::Color32, checked: bool) {
+    let stroke = egui::Stroke::new(1.5, colour);
+    if checked {
+        painter.add(egui::Shape::line(
+            vec![
+                egui::pos2(rect.left(), rect.center().y),
+                egui::pos2(rect.left() + rect.width() * 0.4, rect.bottom()),
+                rect.right_top(),
+            ],
+            stroke,
+        ));
+        return;
+    }
+    let back = egui::Rect::from_min_size(
+        rect.min,
+        egui::vec2(rect.width() * 0.72, rect.height() * 0.72),
+    );
+    painter.rect_stroke(
+        back,
+        egui::CornerRadius::same(2),
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    let front = egui::Rect::from_min_size(
+        egui::pos2(
+            rect.left() + rect.width() * 0.28,
+            rect.top() + rect.height() * 0.28,
+        ),
+        egui::vec2(rect.width() * 0.72, rect.height() * 0.72),
+    );
+    painter.rect_stroke(
+        front,
+        egui::CornerRadius::same(2),
+        stroke,
+        egui::StrokeKind::Inside,
     );
 }
 
+fn paint_external(painter: &egui::Painter, rect: egui::Rect, colour: egui::Color32) {
+    let stroke = egui::Stroke::new(1.4, colour);
+    painter.add(egui::Shape::line(
+        vec![
+            egui::pos2(rect.left(), rect.top() + rect.height() * 0.32),
+            egui::pos2(rect.left(), rect.bottom()),
+            egui::pos2(rect.right() - rect.width() * 0.32, rect.bottom()),
+            egui::pos2(rect.right() - rect.width() * 0.32, rect.top() + rect.height() * 0.58),
+        ],
+        stroke,
+    ));
+    painter.line_segment(
+        [
+            egui::pos2(rect.left() + rect.width() * 0.42, rect.center().y),
+            rect.right_top(),
+        ],
+        stroke,
+    );
+    painter.add(egui::Shape::line(
+        vec![
+            egui::pos2(rect.right() - rect.width() * 0.4, rect.top()),
+            rect.right_top(),
+            egui::pos2(rect.right(), rect.top() + rect.height() * 0.4),
+        ],
+        stroke,
+    ));
+}
+
+/// Camcorder glyph for the OBS card.
+fn paint_cam(painter: &egui::Painter, rect: egui::Rect, colour: egui::Color32) {
+    let body = egui::Rect::from_min_size(
+        rect.min,
+        egui::vec2(rect.width() * 0.70, rect.height() * 0.66),
+    );
+    painter.rect_stroke(
+        body,
+        egui::CornerRadius::same(3),
+        egui::Stroke::new(1.3, colour),
+        egui::StrokeKind::Inside,
+    );
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(body.right() + 1.0, body.center().y - rect.height() * 0.14),
+            egui::pos2(rect.right(), rect.top() + rect.height() * 0.2),
+            egui::pos2(rect.right(), rect.bottom() - rect.height() * 0.2),
+            egui::pos2(body.right() + 1.0, body.center().y + rect.height() * 0.14),
+        ],
+        colour,
+        egui::Stroke::NONE,
+    ));
+}
+
 fn paint_mark(painter: &egui::Painter, rect: egui::Rect) {
-    painter.rect_filled(rect, egui::CornerRadius::same(9), ACCENT);
+    painter.rect_filled(rect, egui::CornerRadius::same(10), ACCENT);
     let screen = egui::Rect::from_center_size(
         egui::pos2(rect.center().x, rect.center().y - rect.height() * 0.06),
         egui::vec2(rect.width() * 0.56, rect.height() * 0.40),
@@ -1578,89 +1906,100 @@ fn paint_mark(painter: &egui::Painter, rect: egui::Rect) {
     painter.rect_filled(stand, 0.0, BG);
 }
 
-/// Idle-state flow picture: phone -> Wi-Fi dots -> laptop showing the mirror window.
+/// Idle-state illustration: phone -> Wi-Fi dots -> monitor showing the mirror window.
 /// Drawn with the painter so it stays vector-sharp at any window size.
 fn paint_flow(painter: &egui::Painter, rect: egui::Rect) {
     let cy = rect.center().y;
+    let stroke = egui::Stroke::new(2.0, LINE);
 
-    // Phone on the left.
-    let phone =
-        egui::Rect::from_center_size(egui::pos2(rect.left() + 64.0, cy), egui::vec2(58.0, 106.0));
-    painter.rect_filled(phone, egui::CornerRadius::same(12), BG);
+    // Phone on the left: white body, emerald screen, home dot.
+    let phone = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 52.0, cy),
+        egui::vec2(80.0, 144.0),
+    );
+    painter.rect_filled(phone, egui::CornerRadius::same(16), BG);
     painter.rect_stroke(
         phone,
-        egui::CornerRadius::same(12),
-        egui::Stroke::new(1.6, BORDER),
+        egui::CornerRadius::same(16),
+        stroke,
         egui::StrokeKind::Inside,
     );
     painter.rect_filled(
         egui::Rect::from_center_size(
-            egui::pos2(phone.center().x, phone.center().y - 5.0),
-            egui::vec2(40.0, 66.0),
-        ),
-        egui::CornerRadius::same(4),
-        ACCENT,
-    );
-    painter.rect_filled(
-        egui::Rect::from_center_size(
-            egui::pos2(phone.center().x, phone.max.y - 13.0),
-            egui::vec2(18.0, 3.0),
+            egui::pos2(phone.center().x, phone.top() + 12.0),
+            egui::vec2(20.0, 4.0),
         ),
         egui::CornerRadius::same(2),
-        SURFACE,
+        BORDER,
     );
-
-    // Laptop on the right, its screen is the green mirror window with the ViewGo glyph.
-    let laptop = egui::Rect::from_center_size(
-        egui::pos2(rect.right() - 98.0, cy - 6.0),
-        egui::vec2(170.0, 104.0),
-    );
-    painter.rect_filled(laptop, egui::CornerRadius::same(8), BG);
+    let screen = egui::Rect::from_center_size(phone.center(), egui::vec2(64.0, 96.0));
+    painter.rect_filled(screen, egui::CornerRadius::same(8), ACCENT);
     painter.rect_stroke(
-        laptop,
-        egui::CornerRadius::same(8),
-        egui::Stroke::new(1.6, BORDER),
+        egui::Rect::from_center_size(screen.center(), egui::vec2(14.0, 24.0)),
+        egui::CornerRadius::same(3),
+        egui::Stroke::new(1.6, ACCENT_INK),
         egui::StrokeKind::Inside,
     );
-    let mirror = egui::Rect::from_center_size(
-        egui::pos2(laptop.center().x, laptop.center().y - 3.0),
-        egui::vec2(148.0, 80.0),
+    painter.circle_filled(
+        egui::pos2(phone.center().x, phone.bottom() - 14.0),
+        2.5,
+        BORDER,
     );
-    painter.rect_filled(mirror, egui::CornerRadius::same(4), ACCENT);
+
+    // Monitor on the right, its screen is the green mirror window with the ViewGo glyph.
+    let monitor = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - 110.0, cy - 14.0),
+        egui::vec2(176.0, 128.0),
+    );
+    painter.rect_filled(monitor, egui::CornerRadius::same(12), BG);
+    painter.rect_stroke(
+        monitor,
+        egui::CornerRadius::same(12),
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    let mirror = monitor.shrink(6.0);
+    painter.rect_filled(mirror, egui::CornerRadius::same(6), ACCENT);
+    let mini = egui::Rect::from_center_size(mirror.center(), egui::vec2(58.0, 36.0));
+    painter.rect_filled(mini, egui::CornerRadius::same(3), ACCENT_DARK);
+    painter.rect_stroke(
+        mini,
+        egui::CornerRadius::same(3),
+        egui::Stroke::new(1.2, LINE),
+        egui::StrokeKind::Inside,
+    );
+    painter.rect_filled(
+        egui::Rect::from_center_size(mini.center(), egui::vec2(20.0, 12.0)),
+        egui::CornerRadius::same(1),
+        ACCENT_INK,
+    );
     painter.rect_filled(
         egui::Rect::from_center_size(
-            egui::pos2(mirror.center().x, mirror.center().y - 6.0),
-            egui::vec2(54.0, 34.0),
+            egui::pos2(monitor.center().x, monitor.bottom() + 8.0),
+            egui::vec2(24.0, 14.0),
+        ),
+        0.0,
+        LINE,
+    );
+    painter.rect_filled(
+        egui::Rect::from_center_size(
+            egui::pos2(monitor.center().x, monitor.bottom() + 16.0),
+            egui::vec2(64.0, 6.0),
         ),
         egui::CornerRadius::same(3),
-        BG,
-    );
-    painter.rect_filled(
-        egui::Rect::from_center_size(
-            egui::pos2(mirror.center().x, mirror.center().y + 24.0),
-            egui::vec2(36.0, 3.0),
-        ),
-        egui::CornerRadius::same(2),
-        BG,
-    );
-    painter.line_segment(
-        [
-            egui::pos2(laptop.left() - 16.0, laptop.bottom() + 6.0),
-            egui::pos2(laptop.right() + 16.0, laptop.bottom() + 6.0),
-        ],
-        egui::Stroke::new(2.4, BORDER),
+        LINE,
     );
 
-    // Wi-Fi dots travelling from the phone to the laptop.
-    let start = phone.right() + 30.0;
-    let end = laptop.left() - 30.0;
-    for (i, radius) in [3.0f32, 4.5, 6.0].into_iter().enumerate() {
+    // Wi-Fi dots travelling from the phone to the monitor: two faint, one solid.
+    let start = phone.right() + 34.0;
+    let end = monitor.left() - 34.0;
+    for (i, radius) in [2.5f32, 3.5, 5.0].into_iter().enumerate() {
         let t = i as f32 / 2.0;
         let x = start + (end - start) * t;
         painter.circle_filled(
             egui::pos2(x, cy),
             radius,
-            if i == 2 { ACCENT } else { SURFACE },
+            if i == 2 { ACCENT } else { LINE },
         );
     }
 }

@@ -29,6 +29,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -36,19 +37,22 @@ import android.widget.Switch
 import android.widget.TextView
 import java.net.Inet4Address
 
-// Palette dealt by design-taste-frontend (`start.mjs brand --page software --bg #fff
-// --accent #0f7b4f --radius soft`): white ground, green action, radius soft.
+// Palette from the mobile redesign (code.html): slate ground, emerald action, radius 24.
 private const val C_BG = "#FFFFFF"
-private const val C_SURFACE = "#F1F2F3"
-private const val C_BORDER = "#E4E7EB"
-private const val C_INK = "#101828"
-private const val C_MUTED = "#5F6772"
-private const val C_ACCENT = "#0F7B4F"
+private const val C_SURFACE = "#F8FAFC"
+private const val C_BORDER = "#E2E8F0"
+private const val C_INK = "#0F172A"
+private const val C_MUTED = "#64748B"
+private const val C_FAINT = "#94A3B8"
+private const val C_ACCENT = "#047857"
+private const val C_ACCENT_MID = "#059669"
+private const val C_ACCENT_SOFT = "#ECFDF5"
+private const val C_ACCENT_EDGE = "#A7F3D0"
 private const val C_ERROR = "#B42318"
 
 class MainActivity : Activity() {
 
-    private lateinit var codeField: EditText
+    private lateinit var codeSlots: List<EditText>
     private lateinit var hostField: EditText
     private lateinit var statusLabel: TextView
     private lateinit var laptopStatus: TextView
@@ -120,124 +124,139 @@ class MainActivity : Activity() {
 
     private fun card(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        background = shape(16, C_BG, C_BORDER, 1)
+        background = shape(24, C_BG, C_BORDER, 1)
         elevation = dp(2).toFloat()
-        setPadding(dp(18), dp(16), dp(18), dp(16))
+        setPadding(dp(20), dp(18), dp(20), dp(18))
     }
 
-    /** Section head: the section glyph plus its title. */
-    private fun sectionHead(iconRes: Int, title: String): LinearLayout =
+    /** Row head above a control: small glyph plus uppercase label and an optional right hint. */
+    private fun optionLabel(iconRes: Int, label: String, hint: String? = null): LinearLayout =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(
                 ImageView(this@MainActivity).apply {
                     setImageResource(iconRes)
+                    setColorFilter(Color.parseColor(C_ACCENT))
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 },
-                LinearLayout.LayoutParams(dp(22), dp(22)),
+                LinearLayout.LayoutParams(dp(16), dp(16)),
             )
             addView(
                 TextView(this@MainActivity).apply {
-                    text = title
-                    textSize = 17f
-                    setTextColor(Color.parseColor(C_INK))
-                    typeface = Typeface.DEFAULT_BOLD
-                },
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    marginStart = dp(10)
-                },
-            )
-        }
-
-    /** Small icon + label above a control. */
-    private fun optionLabel(iconRes: Int, label: String): LinearLayout =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(
-                ImageView(this@MainActivity).apply {
-                    setImageResource(iconRes)
-                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                },
-                LinearLayout.LayoutParams(dp(18), dp(18)),
-            )
-            addView(
-                TextView(this@MainActivity).apply {
-                    text = label
-                    textSize = 15f
-                    setTextColor(Color.parseColor(C_INK))
+                    text = label.uppercase()
+                    textSize = 12f
+                    letterSpacing = 0.06f
+                    setTextColor(Color.parseColor(C_MUTED))
                     typeface = Typeface.DEFAULT_BOLD
                 },
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                     marginStart = dp(8)
                 },
             )
-        }
-
-    /** Numbered step heading: circular accent badge + bold title. */
-    private fun stepHead(number: Int, title: String): LinearLayout =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(
-                TextView(this@MainActivity).apply {
-                    text = number.toString()
-                    textSize = 13f
-                    gravity = Gravity.CENTER
-                    setTextColor(Color.WHITE)
-                    typeface = Typeface.DEFAULT_BOLD
-                    background = GradientDrawable().apply {
-                        shape = GradientDrawable.OVAL
-                        setColor(Color.parseColor(C_ACCENT))
-                    }
-                },
-                LinearLayout.LayoutParams(dp(24), dp(24)),
-            )
-            addView(
-                TextView(this@MainActivity).apply {
-                    text = title
-                    textSize = 18f
-                    setTextColor(Color.parseColor(C_INK))
-                    typeface = Typeface.DEFAULT_BOLD
-                },
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    marginStart = dp(10)
-                },
-            )
-        }
-
-    /** Equal-width selectable chips; the selected one fills green, the others use a green outline. */
-    private fun chipGroup(labels: List<String>, selected: Int, onSelect: (Int) -> Unit): LinearLayout {
-        val chips = mutableListOf<TextView>()
-        fun paint(index: Int) {
-            chips.forEachIndexed { i, chip ->
-                val isSelected = i == index
-                val bg = shape(12, if (isSelected) C_ACCENT else C_BG, C_ACCENT, if (isSelected) 0 else 1)
-                val rippleColor = if (isSelected) Color.parseColor("#40FFFFFF") else Color.parseColor("#1A0F7B4F")
-                chip.background = ripple(bg, rippleColor)
-                chip.setTextColor(Color.parseColor(if (isSelected) "#FFFFFF" else C_ACCENT))
+            if (hint != null) {
+                addView(
+                    TextView(this@MainActivity).apply {
+                        text = hint
+                        textSize = 11f
+                        setTextColor(Color.parseColor(C_FAINT))
+                    },
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ),
+                )
             }
         }
-        val group = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        labels.forEachIndexed { i, label ->
-            val chip = TextView(this).apply {
-                text = label
-                textSize = 14f
+
+    /** Emphasis box around a glyph, as used by the card heads. */
+    private fun iconBox(iconRes: Int, tint: String, fill: String): ImageView =
+        ImageView(this).apply {
+            setImageResource(iconRes)
+            setColorFilter(Color.parseColor(tint))
+            background = shape(12, fill)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+
+    /** Hairline separator inside a card. */
+    private fun rule(): View = View(this).apply { background = shape(1, C_BORDER) }
+
+    /** Segmented pill selector: a slate track holding equal cells; the selected cell fills
+     *  emerald and shows its badge (HD / Fast / Smooth / Eco) on a tinted chip. */
+    private fun segmented(items: List<Pair<String, String>>, selected: Int, onSelect: (Int) -> Unit): LinearLayout {
+        val cells = mutableListOf<LinearLayout>()
+        fun paint(index: Int) {
+            cells.forEachIndexed { i, cell ->
+                val on = i == index
+                cell.background = if (on) {
+                    ripple(shape(12, C_ACCENT), Color.parseColor("#40FFFFFF"))
+                } else {
+                    GradientDrawable().apply {
+                        cornerRadius = dp(12).toFloat()
+                        setColor(Color.TRANSPARENT)
+                    }
+                }
+                val title = cell.getChildAt(0) as TextView
+                title.setTextColor(Color.parseColor(if (on) "#FFFFFF" else C_MUTED))
+                if (cell.childCount > 1) {
+                    val tag = cell.getChildAt(1) as TextView
+                    tag.setTextColor(Color.parseColor(if (on) "#D1FAE5" else C_FAINT))
+                    tag.background = if (on) shape(4, C_ACCENT_MID) else null
+                }
+            }
+        }
+        val group = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = shape(16, "#F1F2F3")
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+        }
+        items.forEachIndexed { i, (label, badge) ->
+            val cell = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER
-                typeface = Typeface.DEFAULT_BOLD
-                isAllCaps = false
-                setPadding(0, dp(12), 0, dp(12))
+                isClickable = true
+                isFocusable = true
                 setOnClickListener {
                     paint(i)
                     onSelect(i)
                 }
             }
-            chips.add(chip)
+            cell.addView(
+                TextView(this).apply {
+                    text = label
+                    textSize = 14f
+                    typeface = Typeface.DEFAULT_BOLD
+                    isAllCaps = false
+                },
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            if (badge.isNotEmpty()) {
+                cell.addView(
+                    TextView(this).apply {
+                        text = badge
+                        textSize = 9f
+                        typeface = Typeface.DEFAULT_BOLD
+                        isAllCaps = false
+                        letterSpacing = 0.04f
+                        gravity = Gravity.CENTER
+                        setPadding(dp(6), dp(1), dp(6), dp(1))
+                    },
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ).apply { marginStart = dp(6) },
+                )
+            }
+            cells.add(cell)
             group.addView(
-                chip,
-                LinearLayout.LayoutParams(0, dp(48), 1f).apply {
-                    if (i > 0) marginStart = dp(8)
+                cell,
+                LinearLayout.LayoutParams(0, dp(44), 1f).apply {
+                    if (i > 0) marginStart = dp(4)
                 },
             )
         }
@@ -299,21 +318,42 @@ class MainActivity : Activity() {
     private fun paintButton(button: Button, filled: Boolean, iconRes: Int, fill: String = C_ACCENT) {
         button.gravity = Gravity.CENTER
         button.setCompoundDrawablesWithIntrinsicBounds(iconRes, 0, 0, 0)
-        button.compoundDrawablePadding = dp(8)
-        val bg = shape(14, if (filled) fill else C_BG, if (filled) fill else C_ACCENT, if (filled) 0 else 1)
-        val rippleColor = if (filled) Color.parseColor("#40FFFFFF") else Color.parseColor("#1A0F7B4F")
+        button.compoundDrawablePadding = dp(10)
+        val textColor = if (filled) Color.WHITE else Color.parseColor(C_ACCENT)
+        // The redesign's CTA runs dark -> mid -> dark across its width; a plain fill elsewhere.
+        val bg: GradientDrawable = if (filled) {
+            GradientDrawable().apply {
+                orientation = GradientDrawable.Orientation.LEFT_RIGHT
+                cornerRadius = dp(16).toFloat()
+                colors =
+                    if (fill == C_ACCENT) {
+                        intArrayOf(
+                            Color.parseColor(C_ACCENT),
+                            Color.parseColor(C_ACCENT_MID),
+                            Color.parseColor(C_ACCENT),
+                        )
+                    } else {
+                        intArrayOf(Color.parseColor(fill), Color.parseColor(fill))
+                    }
+            }
+        } else {
+            shape(16, C_BG, C_ACCENT, 1)
+        }
+        val rippleColor =
+            if (filled) Color.parseColor("#40FFFFFF") else Color.parseColor("#33047857")
         button.background = ripple(bg, rippleColor)
-        button.setTextColor(if (filled) Color.WHITE else Color.parseColor(C_ACCENT))
+        button.setTextColor(textColor)
+        button.compoundDrawableTintList = ColorStateList.valueOf(textColor)
         button.typeface = Typeface.DEFAULT_BOLD
         button.textSize = 16f
         button.isAllCaps = false
-        button.setPadding(dp(20), dp(14), dp(20), dp(14))
-        button.elevation = if (filled) dp(3).toFloat() else 0f
+        button.setPadding(dp(20), dp(16), dp(20), dp(16))
+        button.elevation = if (filled) dp(4).toFloat() else 0f
     }
 
     private fun codeBg(focused: Boolean): RippleDrawable {
-        val bg = shape(14, C_SURFACE, if (focused) C_ACCENT else C_BORDER, if (focused) 2 else 1)
-        return ripple(bg, Color.parseColor("#1A0F7B4F"))
+        val bg = shape(16, C_SURFACE, if (focused) C_ACCENT_MID else C_BORDER, if (focused) 2 else 1)
+        return ripple(bg, Color.parseColor("#33047857"))
     }
 
     /** Discovery deadline: stop the scan and point the user at the manual IP field. */
@@ -331,6 +371,9 @@ class MainActivity : Activity() {
         discoveryListener = null
         mainHandler.removeCallbacks(searchTimeout)
     }
+
+    /** The four PIN slots read back as one 4-character code. */
+    private fun pairingCode(): String = codeSlots.joinToString("") { it.text.toString() }
 
     private fun setStatus(text: String, error: Boolean = false) {
         statusLabel.text = text
@@ -373,19 +416,26 @@ class MainActivity : Activity() {
 
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor(C_BG))
+            setBackgroundColor(Color.parseColor(C_SURFACE))
             setPadding(dp(20), 0, dp(20), dp(8))
         }
 
-        // Header: brand mark on a soft squircle, title and one-line promise.
+        // Header: emerald tile with the white screen glyph, title and one-line promise.
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(
                 ImageView(this@MainActivity).apply {
-                    setImageResource(R.drawable.ic_logo)
-                    background = shape(14, C_SURFACE)
-                    setPadding(dp(10), dp(10), dp(10), dp(10))
+                    setImageResource(R.drawable.ic_mark)
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(16).toFloat()
+                        orientation = GradientDrawable.Orientation.BL_TR
+                        colors = intArrayOf(
+                            Color.parseColor(C_ACCENT),
+                            Color.parseColor(C_ACCENT_MID),
+                        )
+                    }
+                    setPadding(dp(12), dp(12), dp(12), dp(12))
                     scaleType = ImageView.ScaleType.FIT_CENTER
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 },
@@ -397,15 +447,15 @@ class MainActivity : Activity() {
                     addView(
                         TextView(this@MainActivity).apply {
                             text = "ViewGo"
-                            textSize = 26f
+                            textSize = 24f
                             typeface = Typeface.DEFAULT_BOLD
                             setTextColor(Color.parseColor(C_INK))
                         },
                     )
                     addView(
                         TextView(this@MainActivity).apply {
-                            text = "Mirror your phone to your laptop over Wi-Fi"
-                            textSize = 14f
+                            text = "Mirror your phone to laptop over Wi-Fi"
+                            textSize = 12f
                             setTextColor(Color.parseColor(C_MUTED))
                         },
                     )
@@ -418,29 +468,159 @@ class MainActivity : Activity() {
         content.addView(header, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         content.addView(View(this), ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(20)))
 
-        // Step 1: find the laptop. Two ways: tap the search button, or type the IP manually.
-        val step1 = card().apply {
-            addView(stepHead(1, "Find your laptop"))
+        // Connect card: auto-discovery banner, manual IP, and the 4-slot pairing code.
+        val connect = card().apply {
+            // Head: tinted glyph box, title and subtitle over a hairline.
             addView(
-                TextView(this@MainActivity).apply {
-                    text = "Tap search to find the laptop on Wi-Fi, or type its IP address below."
-                    textSize = 14f
-                    setTextColor(Color.parseColor(C_MUTED))
-                    setPadding(0, dp(6), 0, 0)
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(
+                        iconBox(R.drawable.ic_laptop, C_ACCENT, C_ACCENT_SOFT),
+                        LinearLayout.LayoutParams(dp(36), dp(36)),
+                    )
+                    addView(
+                        LinearLayout(this@MainActivity).apply {
+                            orientation = LinearLayout.VERTICAL
+                            addView(
+                                TextView(this@MainActivity).apply {
+                                    text = "Connect to laptop"
+                                    textSize = 16f
+                                    typeface = Typeface.DEFAULT_BOLD
+                                    setTextColor(Color.parseColor(C_INK))
+                                },
+                            )
+                            addView(
+                                TextView(this@MainActivity).apply {
+                                    text = "Search receiver or enter connection details"
+                                    textSize = 11f
+                                    setTextColor(Color.parseColor(C_FAINT))
+                                },
+                            )
+                        },
+                        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                            marginStart = dp(10)
+                        },
+                    )
                 },
-                cardGap(),
             )
+            addView(rule(), cardGap().apply { topMargin = dp(14) })
 
-            val searchPrimary = Button(this@MainActivity).apply {
-                text = "Search laptop"
+            // Primary action: one tap scans this Wi-Fi for the receiver.
+            val banner = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = ripple(
+                    GradientDrawable().apply {
+                        cornerRadius = dp(16).toFloat()
+                        orientation = GradientDrawable.Orientation.LEFT_RIGHT
+                        colors = intArrayOf(
+                            Color.parseColor(C_ACCENT_SOFT),
+                            Color.parseColor("#DDF7EA"),
+                        )
+                        setStroke(dp(1), Color.parseColor(C_ACCENT_EDGE))
+                    },
+                    Color.parseColor("#33059669"),
+                )
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+                isClickable = true
+                isFocusable = true
+                contentDescription = "Search this Wi-Fi for the laptop automatically"
                 setOnClickListener { discoverReceiver() }
+                addView(
+                    FrameLayout(this@MainActivity).apply {
+                        clipChildren = false
+                        addView(
+                            ImageView(this@MainActivity).apply {
+                                setImageResource(R.drawable.ic_search)
+                                background = GradientDrawable().apply {
+                                    cornerRadius = dp(12).toFloat()
+                                    setColor(Color.parseColor(C_ACCENT_MID))
+                                }
+                                setPadding(dp(11), dp(11), dp(11), dp(11))
+                                scaleType = ImageView.ScaleType.FIT_CENTER
+                                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                            },
+                            FrameLayout.LayoutParams(dp(40), dp(40)),
+                        )
+                        // Scanning hint dot, hanging over the tile corner as in the redesign.
+                        addView(
+                            View(this@MainActivity).apply {
+                                background = GradientDrawable().apply {
+                                    shape = GradientDrawable.OVAL
+                                    setColor(Color.parseColor("#10B981"))
+                                    setStroke(dp(2), Color.WHITE)
+                                }
+                            },
+                            FrameLayout.LayoutParams(dp(10), dp(10)).apply {
+                                gravity = Gravity.TOP or Gravity.END
+                                setMargins(0, dp(-3), dp(-3), 0)
+                            },
+                        )
+                    },
+                    LinearLayout.LayoutParams(dp(40), dp(40)),
+                )
+                addView(
+                    LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(
+                            LinearLayout(this@MainActivity).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                gravity = Gravity.CENTER_VERTICAL
+                                addView(
+                                    TextView(this@MainActivity).apply {
+                                        text = "Cari Laptop Otomatis"
+                                        textSize = 12f
+                                        typeface = Typeface.DEFAULT_BOLD
+                                        setTextColor(Color.parseColor(C_INK))
+                                    },
+                                )
+                                addView(
+                                    TextView(this@MainActivity).apply {
+                                        text = "RECOMMENDED"
+                                        textSize = 9f
+                                        typeface = Typeface.DEFAULT_BOLD
+                                        letterSpacing = 0.06f
+                                        gravity = Gravity.CENTER
+                                        setTextColor(Color.parseColor(C_ACCENT))
+                                        background = shape(4, C_BG, C_ACCENT_EDGE, 1)
+                                        setPadding(dp(6), dp(2), dp(6), dp(2))
+                                    },
+                                    LinearLayout.LayoutParams(
+                                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                                    ).apply { marginStart = dp(6) },
+                                )
+                            },
+                        )
+                        addView(
+                            TextView(this@MainActivity).apply {
+                                text = "Quick Auto-Discovery: tap to scan Wi-Fi"
+                                textSize = 11f
+                                setTextColor(Color.parseColor("#475569"))
+                                setPadding(0, dp(2), 0, 0)
+                            },
+                        )
+                    },
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                        marginStart = dp(12)
+                    },
+                )
+                addView(
+                    ImageView(this@MainActivity).apply {
+                        setImageResource(R.drawable.ic_chevron)
+                        background = shape(16, C_BG, C_ACCENT_EDGE, 1)
+                        setPadding(dp(8), dp(8), dp(8), dp(8))
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                    },
+                    LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginStart = dp(10) },
+                )
             }
-            paintButton(searchPrimary, true, R.drawable.ic_search)
-            addView(searchPrimary, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply {
-                topMargin = dp(14)
-            })
+            addView(banner, cardGap().apply { topMargin = dp(16) })
 
-            val divider = LinearLayout(this@MainActivity).apply {
+            // Manual path behind a centred label, as the redesign splits it.
+            val manualDivider = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 addView(
@@ -449,10 +629,12 @@ class MainActivity : Activity() {
                 )
                 addView(
                     TextView(this@MainActivity).apply {
-                        text = "or"
-                        textSize = 13f
-                        setTextColor(Color.parseColor(C_MUTED))
-                        setPadding(dp(12), dp(6), dp(12), dp(6))
+                        text = "ATAU MANUAL"
+                        textSize = 10f
+                        typeface = Typeface.DEFAULT_BOLD
+                        letterSpacing = 0.08f
+                        setTextColor(Color.parseColor(C_FAINT))
+                        setPadding(dp(10), dp(6), dp(10), dp(6))
                     },
                     LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT),
                 )
@@ -461,26 +643,55 @@ class MainActivity : Activity() {
                     LinearLayout.LayoutParams(0, dp(1), 1f),
                 )
             }
-            addView(divider, cardGap().apply { topMargin = dp(6) })
+            addView(manualDivider, cardGap().apply { topMargin = dp(18) })
 
             addView(
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(
+                        TextView(this@MainActivity).apply {
+                            text = "LAPTOP IP (OPTIONAL / MANUAL)"
+                            textSize = 12f
+                            typeface = Typeface.DEFAULT_BOLD
+                            letterSpacing = 0.06f
+                            setTextColor(Color.parseColor(C_MUTED))
+                        },
+                        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                    )
+                    addView(
+                        TextView(this@MainActivity).apply {
+                            text = "Port :47810"
+                            textSize = 11f
+                            setTextColor(Color.parseColor(C_FAINT))
+                        },
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ),
+                    )
+                },
+                cardGap().apply { topMargin = dp(18) },
+            )
+            addView(
                 TextView(this@MainActivity).apply {
-                    text = "Laptop IP address (optional)"
-                    textSize = 15f
-                    typeface = Typeface.DEFAULT_BOLD
-                    setTextColor(Color.parseColor(C_INK))
+                    text = "Ketik IP jika auto-search tidak menemukan receiver"
+                    textSize = 11f
+                    setTextColor(Color.parseColor(C_MUTED))
                 },
                 cardGap().apply { topMargin = dp(4) },
             )
             hostField = EditText(this@MainActivity).apply {
-                hint = "192.168.1.24"
+                hint = "e.g. 192.168.1.X"
                 keyListener = android.text.method.DigitsKeyListener.getInstance("0123456789.:")
                 filters = arrayOf(InputFilter.LengthFilter(21))
                 setSingleLine()
                 typeface = Typeface.MONOSPACE
-                textSize = 18f
+                textSize = 15f
                 setTextColor(Color.parseColor(C_INK))
-                setHintTextColor(Color.parseColor(C_MUTED))
+                setHintTextColor(Color.parseColor(C_FAINT))
+                setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_globe, 0, 0, 0)
+                compoundDrawablePadding = dp(8)
                 background = codeBg(false)
                 onFocusChangeListener = View.OnFocusChangeListener { _, hasFocus ->
                     background = codeBg(hasFocus)
@@ -488,150 +699,412 @@ class MainActivity : Activity() {
                 minHeight = dp(52)
                 setPadding(dp(16), dp(14), dp(16), dp(14))
             }
-            addView(hostField, cardGap().apply { topMargin = dp(8) })
             addView(
-                TextView(this@MainActivity).apply {
-                    text = "Add :port only if the receiver uses a custom port."
-                    textSize = 13f
-                    setTextColor(Color.parseColor(C_MUTED))
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(
+                        hostField,
+                        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                    )
+                    addView(
+                        Button(this@MainActivity).apply {
+                            contentDescription = "Search this Wi-Fi for the laptop"
+                            minWidth = 0
+                            minHeight = 0
+                            elevation = 0f
+                            isAllCaps = false
+                            setPadding(0, 0, 0, 0)
+                            setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_search, 0, 0, 0)
+                            compoundDrawableTintList =
+                                ColorStateList.valueOf(Color.parseColor("#475569"))
+                            background = ripple(
+                                shape(16, "#F1F2F3", C_BORDER, 1),
+                                Color.parseColor("#33047857"),
+                            )
+                            setOnClickListener { discoverReceiver() }
+                        },
+                        LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginStart = dp(8) },
+                    )
                 },
-                cardGap(),
+                cardGap().apply { topMargin = dp(8) },
             )
 
             laptopStatus = TextView(this@MainActivity).apply {
-                text = "Tap Search laptop, or enter the IP address manually."
-                textSize = 13f
+                text = "Auto-search scans this Wi-Fi; type the IP above if it fails."
+                textSize = 12f
                 setTextColor(Color.parseColor(C_MUTED))
                 setPadding(0, dp(10), 0, 0)
             }
             addView(laptopStatus, cardGap())
-        }
-        addCard(content, step1)
 
-        // Step 2: pairing code.
-        val step2 = card().apply {
-            addView(stepHead(2, "Enter pairing code"))
-            codeField = EditText(this@MainActivity).apply {
-                hint = "AB3D"
-                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
-                filters = arrayOf(InputFilter.LengthFilter(4))
-                setSingleLine()
-                typeface = Typeface.MONOSPACE
-                letterSpacing = 0.28f
-                gravity = Gravity.CENTER
-                textSize = 28f
-                setTextColor(Color.parseColor(C_INK))
-                setHintTextColor(Color.parseColor(C_MUTED))
-                background = codeBg(false)
-                onFocusChangeListener = View.OnFocusChangeListener { _, hasFocus ->
-                    background = codeBg(hasFocus)
-                }
-                addTextChangedListener(object : TextWatcher {
-                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
-                    override fun afterTextChanged(s: Editable?) {
-                        s?.let {
-                            val upper = it.toString().uppercase()
-                            if (upper != it.toString()) {
-                                it.replace(0, it.length, upper)
+            // Pairing code: four discrete slots that read back as one code.
+            addView(
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(
+                        TextView(this@MainActivity).apply {
+                            text = "PAIRING CODE"
+                            textSize = 12f
+                            typeface = Typeface.DEFAULT_BOLD
+                            letterSpacing = 0.06f
+                            setTextColor(Color.parseColor(C_MUTED))
+                        },
+                        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                    )
+                    addView(
+                        TextView(this@MainActivity).apply {
+                            text = "Encrypted PIN"
+                            textSize = 11f
+                            setTextColor(Color.parseColor(C_ACCENT_MID))
+                            setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_key, 0, 0, 0)
+                            compoundDrawablePadding = dp(4)
+                            compoundDrawableTintList =
+                                ColorStateList.valueOf(Color.parseColor(C_ACCENT_MID))
+                        },
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ),
+                    )
+                },
+                cardGap().apply { topMargin = dp(18) },
+            )
+            val slotHints = listOf("A", "B", "3", "D")
+            val pinRow = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            codeSlots = (0..3).map { index ->
+                EditText(this@MainActivity).apply {
+                    hint = slotHints[index]
+                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+                    filters = arrayOf(InputFilter.LengthFilter(1))
+                    setSingleLine()
+                    typeface = Typeface.MONOSPACE
+                    letterSpacing = 0.1f
+                    gravity = Gravity.CENTER
+                    textSize = 20f
+                    setTextColor(Color.parseColor(C_INK))
+                    setHintTextColor(Color.parseColor(C_FAINT))
+                    background = codeBg(false)
+                    onFocusChangeListener = View.OnFocusChangeListener { _, hasFocus ->
+                        background = codeBg(hasFocus)
+                    }
+                    addTextChangedListener(object : TextWatcher {
+                        override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                        override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                        override fun afterTextChanged(s: Editable?) {
+                            if (s == null) return
+                            val text = s.toString()
+                            val upper = text.uppercase()
+                            if (upper != text) {
+                                s.replace(0, s.length, upper)
+                                return
+                            }
+                            // Fill advances, deleting at the start of a slot walks back.
+                            if (text.length == 1 && index < 3) {
+                                codeSlots[index + 1].requestFocus()
+                            } else if (text.isEmpty() && index > 0) {
+                                val previous = codeSlots[index - 1]
+                                previous.requestFocus()
+                                previous.setSelection(previous.text.length)
                             }
                         }
-                    }
-                })
-                minHeight = dp(56)
-                setPadding(dp(16), dp(16), dp(16), dp(16))
+                    })
+                    minHeight = dp(52)
+                    setPadding(0, dp(14), 0, dp(14))
+                }.also { slot ->
+                    pinRow.addView(
+                        slot,
+                        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                            if (index > 0) marginStart = dp(8)
+                        },
+                    )
+                }
             }
-            addView(codeField, cardGap().apply { topMargin = dp(14) })
+            addView(pinRow, cardGap().apply { topMargin = dp(8) })
             addView(
                 TextView(this@MainActivity).apply {
-                    text = "Type the 4-character code shown on the ViewGo window."
-                    textSize = 13f
-                    setTextColor(Color.parseColor(C_MUTED))
+                    text = "Type the 4-character code shown on your laptop screen"
+                    textSize = 11f
+                    setTextColor(Color.parseColor(C_FAINT))
                     gravity = Gravity.CENTER
                     setPadding(0, dp(8), 0, 0)
                 },
             )
         }
-        addCard(content, step2)
+        addCard(content, connect)
 
-        // Status banner: a compact, scannable summary of what's happening.
-        val statusBanner = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = shape(14, C_SURFACE)
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            statusDot = View(this@MainActivity).apply {
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(Color.parseColor(C_ACCENT))
-                }
+        // Guide card: the redesign's phone -> laptop illustration over the live status line.
+        val guide = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(24).toFloat()
+                orientation = GradientDrawable.Orientation.TOP_BOTTOM
+                colors = intArrayOf(Color.parseColor(C_ACCENT_SOFT), Color.parseColor(C_BG))
+                setStroke(dp(1), Color.parseColor("#D1FAE5"))
             }
+            setPadding(dp(20), dp(16), dp(20), dp(14))
+        }
+        // Phone column: outlined body with a tinted screen and a home dot, label beneath.
+        val phoneColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
             addView(
-                statusDot,
-                LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(10) },
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    background = shape(12, C_BG, C_ACCENT, 2)
+                    setPadding(dp(5), dp(6), dp(5), dp(6))
+                    addView(
+                        View(this@MainActivity).apply { background = shape(1, C_BORDER) },
+                        LinearLayout.LayoutParams(dp(14), dp(2)).apply {
+                            gravity = Gravity.CENTER_HORIZONTAL
+                        },
+                    )
+                    addView(
+                        View(this@MainActivity).apply { background = shape(4, C_ACCENT_SOFT) },
+                        LinearLayout.LayoutParams(0, 0, 1f).apply {
+                            setMargins(0, dp(4), 0, dp(4))
+                        },
+                    )
+                    addView(
+                        View(this@MainActivity).apply {
+                            background = GradientDrawable().apply {
+                                shape = GradientDrawable.OVAL
+                                setColor(Color.parseColor(C_ACCENT_MID))
+                            }
+                        },
+                        LinearLayout.LayoutParams(dp(8), dp(8)).apply {
+                            gravity = Gravity.CENTER_HORIZONTAL
+                        },
+                    )
+                },
+                LinearLayout.LayoutParams(dp(48), dp(80)),
             )
-            statusLabel = TextView(this@MainActivity).apply {
-                text = "Start the receiver on your laptop, then fill the steps above."
-                textSize = 14f
-                setLineSpacing(dp(2).toFloat(), 1f)
-                setTextColor(Color.parseColor(C_MUTED))
-            }
             addView(
-                statusLabel,
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                TextView(this@MainActivity).apply {
+                    text = "Phone"
+                    textSize = 10f
+                    setTextColor(Color.parseColor(C_MUTED))
+                    gravity = Gravity.CENTER
+                },
+                LinearLayout.LayoutParams(dp(48), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL
+                    topMargin = dp(4)
+                },
             )
         }
-        content.addView(statusBanner, cardGap().apply { topMargin = dp(6) })
-        content.addView(
+        // Beam column: three dots, the flash glyph, and the Wi-Fi Direct chip.
+        val beamColumn = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            addView(
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    listOf(C_ACCENT_MID, C_ACCENT_EDGE, C_ACCENT_MID).forEachIndexed { i, color ->
+                        addView(
+                            View(this@MainActivity).apply {
+                                background = GradientDrawable().apply {
+                                    shape = GradientDrawable.OVAL
+                                    setColor(Color.parseColor(color))
+                                }
+                            },
+                            LinearLayout.LayoutParams(dp(6), dp(6)).apply {
+                                if (i > 0) marginStart = dp(5)
+                            },
+                        )
+                    }
+                },
+            )
+            addView(
+                ImageView(this@MainActivity).apply {
+                    setImageResource(R.drawable.ic_bolt)
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                },
+                LinearLayout.LayoutParams(dp(24), dp(24)).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL
+                    setMargins(0, dp(4), 0, dp(4))
+                },
+            )
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = "WI-FI DIRECT"
+                    textSize = 9f
+                    typeface = Typeface.DEFAULT_BOLD
+                    letterSpacing = 0.06f
+                    gravity = Gravity.CENTER
+                    setTextColor(Color.parseColor(C_ACCENT))
+                    background = shape(4, "#D1FAE5")
+                    setPadding(dp(6), dp(2), dp(6), dp(2))
+                },
+            )
+        }
+        // Laptop column: outlined screen standing on a solid base.
+        val laptopColumn = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            addView(
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER
+                    background = GradientDrawable().apply {
+                        cornerRadii = floatArrayOf(
+                            dp(8).toFloat(), dp(8).toFloat(),
+                            dp(8).toFloat(), dp(8).toFloat(),
+                            0f, 0f, 0f, 0f,
+                        )
+                        setColor(Color.parseColor(C_BG))
+                        setStroke(dp(2), Color.parseColor(C_ACCENT))
+                    }
+                    setPadding(dp(6), dp(6), dp(6), dp(6))
+                    addView(
+                        View(this@MainActivity).apply { background = shape(4, "#F1F2F3", C_BORDER, 1) },
+                        LinearLayout.LayoutParams(dp(54), dp(32)).apply {
+                            gravity = Gravity.CENTER
+                        },
+                    )
+                },
+                LinearLayout.LayoutParams(dp(78), dp(54)),
+            )
+            addView(
+                View(this@MainActivity).apply { background = shape(2, C_ACCENT) },
+                LinearLayout.LayoutParams(dp(92), dp(5)).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL
+                },
+            )
+            addView(
+                View(this@MainActivity).apply { background = shape(2, "#94A3B8") },
+                LinearLayout.LayoutParams(dp(30), dp(4)).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL
+                },
+            )
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = "Laptop"
+                    textSize = 10f
+                    setTextColor(Color.parseColor(C_MUTED))
+                    gravity = Gravity.CENTER
+                },
+                LinearLayout.LayoutParams(dp(92), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL
+                    topMargin = dp(4)
+                },
+            )
+        }
+        val illustrationRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            addView(phoneColumn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(
+                beamColumn,
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    marginStart = dp(16)
+                    marginEnd = dp(16)
+                },
+            )
+            addView(laptopColumn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        guide.addView(illustrationRow, cardGap())
+        guide.addView(
             TextView(this).apply {
-                text = "Both devices must be on the same Wi-Fi network."
-                textSize = 13f
+                text = "Both devices must be on the same Wi-Fi network"
+                textSize = 12f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.parseColor(C_INK))
+                gravity = Gravity.CENTER
+            },
+            cardGap().apply { topMargin = dp(10) },
+        )
+        guide.addView(
+            TextView(this).apply {
+                text = "Start the receiver on your laptop, then find it here"
+                textSize = 11f
                 setTextColor(Color.parseColor(C_MUTED))
                 gravity = Gravity.CENTER
             },
-            cardGap().apply { topMargin = dp(8) },
+            cardGap().apply { topMargin = dp(2) },
         )
-        content.addView(View(this), cardGap().apply { height = dp(12) })
+        // Live status from the service: dot plus message, kept from the old status banner.
+        statusDot = View(this@MainActivity).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor(C_ACCENT))
+            }
+        }
+        statusLabel = TextView(this@MainActivity).apply {
+            text = "Ready to mirror."
+            textSize = 13f
+            setLineSpacing(dp(2).toFloat(), 1f)
+            setTextColor(Color.parseColor(C_MUTED))
+        }
+        guide.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(
+                    statusDot,
+                    LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) },
+                )
+                addView(
+                    statusLabel,
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                )
+            },
+            cardGap().apply { topMargin = dp(10) },
+        )
+        addCard(content, guide)
 
-        // Options card: quality, frame rate, share target, audio.
+        // Options card: segmented selectors under uppercase row heads, as in the redesign.
         val optionsCard = card().apply {
-            addView(sectionHead(R.drawable.ic_settings, "Options"))
-
-            addView(optionLabel(R.drawable.ic_gauge, "Quality"), cardGap())
+            // The head doubles as the quality row: gear + OPTIONS left, "Quality Mode" right.
+            addView(optionLabel(R.drawable.ic_settings, "Options", hint = "Quality Mode"))
             addView(
-                chipGroup(listOf("1080p", "720p"), qualityIndex) {
+                segmented(listOf("1080p" to "HD", "720p" to "Fast"), qualityIndex) {
                     qualityIndex = it
                 },
-                cardGap().apply { topMargin = dp(8) },
+                cardGap().apply { topMargin = dp(10) },
             )
 
-            addView(optionLabel(R.drawable.ic_flow, "Frame rate"), cardGap().apply { topMargin = dp(20) })
+            addView(rule(), cardGap().apply { topMargin = dp(16) })
             addView(
-                chipGroup(listOf("30 fps", "60 fps"), fpsIndex) { fpsIndex = it },
-                cardGap().apply { topMargin = dp(8) },
+                optionLabel(R.drawable.ic_bolt, "Frame rate", hint = "Refresh Rate"),
+                cardGap().apply { topMargin = dp(16) },
+            )
+            addView(
+                segmented(listOf("30 FPS" to "Eco", "60 FPS" to "Smooth"), fpsIndex) { fpsIndex = it },
+                cardGap().apply { topMargin = dp(10) },
             )
 
-            addView(optionLabel(R.drawable.ic_apps, "Share"), cardGap().apply { topMargin = dp(20) })
+            addView(rule(), cardGap().apply { topMargin = dp(16) })
+            addView(
+                optionLabel(R.drawable.ic_apps, "Share", hint = "What to mirror"),
+                cardGap().apply { topMargin = dp(16) },
+            )
             val shareLabels = if (Build.VERSION.SDK_INT >= 34) {
                 listOf("Whole screen", "One app")
             } else {
                 listOf("Whole screen")
             }
             addView(
-                chipGroup(shareLabels, shareIndex) { shareIndex = it },
-                cardGap().apply { topMargin = dp(8) },
+                segmented(shareLabels.map { it to "" }, shareIndex) { shareIndex = it },
+                cardGap().apply { topMargin = dp(10) },
             )
 
+            addView(rule(), cardGap().apply { topMargin = dp(16) })
             addView(
                 switchRow(R.drawable.ic_volume, "Internal audio", audioOn) { audioOn = it },
-                cardGap().apply { topMargin = dp(20) },
+                cardGap().apply { topMargin = dp(16) },
             )
 
             addView(
                 TextView(this@MainActivity).apply {
                     text = "1080p and 60 fps are best effort. If the phone gets hot, switch to 720p or 30 fps."
-                    textSize = 13f
+                    textSize = 12f
                     setTextColor(Color.parseColor(C_MUTED))
+                    gravity = Gravity.CENTER
                     setPadding(0, dp(14), 0, 0)
                 },
             )
@@ -658,7 +1131,8 @@ class MainActivity : Activity() {
         val scroll = ScrollView(this).apply { addView(content) }
         val outer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor(C_BG))
+            // Slate ground under the white cards and the CTA dock, per the redesign.
+            setBackgroundColor(Color.parseColor(C_SURFACE))
             addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             addView(
                 primaryButton,
@@ -718,7 +1192,7 @@ class MainActivity : Activity() {
             hostField.requestFocus()
             return
         }
-        val code = normalizeCode(codeField.text.toString())
+        val code = normalizeCode(pairingCode())
         if (code == null) {
             setStatus("The pairing code has 4 letters or digits.", error = true)
             return
