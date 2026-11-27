@@ -26,9 +26,14 @@ Read `PRD.md` for scope and `docs/PROTOCOL.md` for the wire format.
   whole screen.
 - Optional internal media/game audio streams over the encrypted session; enable it on the phone,
   and install `ffplay` on Windows. Android or an individual app may block playback capture.
-- The laptop opens a native ViewGo window (white/green theme) with the pairing code, live status,
-  the measured resolution and frame rate, a log panel for phone logs and receiver events, and the
-  stream. Maximize it: the picture gets bigger and reads sharper.
+- The laptop opens two native windows (white/green theme): **ViewGo** holds the pairing code, live
+  status, measured resolution/frame rate (`in / dec fps`), the log panel and how-to-connect, and
+  **ViewGo Mirror** carries only the picture — borderless and title-stable so OBS can window-capture
+  it and show it fullscreen.
+- Delay is bounded instead of queued: the phone keeps at most two frames in flight, drops the
+  oldest (then requests a fresh keyframe) rather than building up delay, and logs `encode delay
+  X ms` / `send blocked X ms` / `dropped N frames`; the laptop shows `in / dec fps` so a stalled
+  decoder is visible. End-to-end milliseconds still need a measurement on real hardware.
 - Stop from the phone app, the notification, or the laptop (Quit / close window), or by revoking
   capture.
 - Phone log is shown on the laptop (log panel and `phone: ...`); the Android app keeps its log

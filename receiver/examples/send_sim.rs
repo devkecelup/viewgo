@@ -108,6 +108,15 @@ fn main() -> std::io::Result<()> {
             segment.height
         );
     }
+    // Optional hold (VIEWGO_SIM_HOLD seconds) so the session stays alive while frames flow:
+    // a session that closes immediately kills ffmpeg before it can emit a full frame, which
+    // makes it impossible to observe the real decode/display path.
+    if let Ok(secs) = std::env::var("VIEWGO_SIM_HOLD") {
+        if let Ok(n) = secs.parse::<u64>() {
+            println!("holding session open for {n}s");
+            std::thread::sleep(std::time::Duration::from_secs(n));
+        }
+    }
     write_frame(&mut writer, &cipher.seal(&[T_STOP]))?;
     writer.flush()?;
     Ok(())

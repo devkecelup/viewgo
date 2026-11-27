@@ -326,7 +326,27 @@ class MainActivity : Activity() {
         }
         root.addView(statusLabel, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        setContentView(ScrollView(this).apply { addView(root) })
+        val scroll = ScrollView(this).apply { addView(root) }
+        // Content must clear the status bar: with targetSdk 35 Android 15 draws edge-to-edge, so
+        // without this the header sits under the battery/clock and Stop can hide behind the nav bar.
+        scroll.setOnApplyWindowInsetsListener { view, insets ->
+            val top = if (Build.VERSION.SDK_INT >= 30) {
+                insets.getInsets(android.view.WindowInsets.Type.systemBars()).top
+            } else {
+                @Suppress("DEPRECATION")
+                insets.systemWindowInsetTop
+            }
+            val bottom = if (Build.VERSION.SDK_INT >= 30) {
+                insets.getInsets(android.view.WindowInsets.Type.systemBars()).bottom
+            } else {
+                @Suppress("DEPRECATION")
+                insets.systemWindowInsetBottom
+            }
+            view.setPadding(dp(20), dp(18) + top, dp(20), dp(24) + bottom)
+            insets
+        }
+        setContentView(scroll)
+        scroll.requestApplyInsets()
 
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED

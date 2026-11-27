@@ -23,12 +23,14 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Surface
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
+import java.util.concurrent.ArrayBlockingQueue
 
 class MirrorService : Service() {
 
@@ -62,6 +64,14 @@ class MirrorService : Service() {
     private var encoderSurface: Surface? = null
     private var virtualDisplay: VirtualDisplay? = null
     @Volatile private var audioRecord: AudioRecord? = null
+    // Bounded video queue: at most 2 frames in flight. When the network is slower than the
+    // encoder the oldest frame is dropped instead of queued, so delay cannot grow.
+    private val videoQueue = ArrayBlockingQueue<ByteArray>(2)
+    private var needSync = false
+    private var lastSyncRequest = 0L
+    private var droppedFrames = 0L
+    private var lastDropReport = 0L
+    private var lastEncodeReport = 0L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -241,6 +251,9 @@ class MirrorService : Service() {
 
         val audio = if (audioRequested) startAudioCapture(projection, session) else null
         val audioThread = startAudioThread(session, audio)
+        videoQueue.clear()
+        needSync = false
+        val senderThread = startVideoSender(session)
         sendVideoConfig(session, opened.width, opened.height)
         var csd = runCatching { readCsd(opened.codec.outputFormat) }.getOrNull()
         var orientation = currentRotation()
@@ -283,13 +296,27 @@ class MirrorService : Service() {
                         payload[0] = if (keyframe) 1 else 0
                         putLong(payload, 1, info.presentationTimeUs)
                         System.arraycopy(nal, 0, payload, 9, nal.size)
-                        session.send(Proto.T_VIDEO_FRAME, payload)
+                        reportEncodeDelay(info.presentationTimeUs)
+                        if (keyframe) needSync = false
+                        if (needSync) {
+                            // Waiting for the IDR requested after a drop: sending a P-frame that
+                            // references a dropped one would corrupt the picture until recovery.
+                            noteDropped(codec)
+                        } else if (!videoQueue.offer(payload)) {
+                            videoQueue.poll()
+                            videoQueue.offer(payload)
+                            needSync = true
+                            noteDropped(codec)
+                        }
                     }
                 } finally {
                     codec.releaseOutputBuffer(index, false)
                 }
             }
         } finally {
+            senderThread.interrupt()
+            runCatching { senderThread.join(500) }
+            videoQueue.clear()
             stopAudio(audio, audioThread)
         }
     }
@@ -376,6 +403,65 @@ class MirrorService : Service() {
         runCatching { record?.release() }
         if (audioRecord === record) audioRecord = null
     }
+
+    /** Capture to encoder-output delay, clock-free (both stamps are the phone monotonic clock). */
+    private fun reportEncodeDelay(presentationTimeUs: Long) {
+        val nowUs = System.nanoTime() / 1000
+        val ms = (nowUs - presentationTimeUs) / 1000
+        if (ms < 0 || ms > 5_000) return // unexpected PTS base, do not report nonsense
+        if (ms < 200) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastEncodeReport < 1_000) return
+        lastEncodeReport = now
+        AppLog.line("encode delay ${ms} ms")
+    }
+
+    private fun noteDropped(codec: MediaCodec) {
+        droppedFrames++
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastDropReport < 1_000) return
+        lastDropReport = now
+        AppLog.line("dropped $droppedFrames frames (keeping delay low)")
+        droppedFrames = 0
+        // Ask for an IDR so the picture recovers; throttled to avoid piling keyframes onto a
+        // network that is already behind.
+        if (now - lastSyncRequest >= 500) {
+            lastSyncRequest = now
+            runCatching {
+                codec.setParameters(android.os.Bundle().apply {
+                    putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                })
+            }
+        }
+    }
+
+    /** Drains the bounded queue off the encode loop so a slow socket cannot stall the encoder. */
+    private fun startVideoSender(session: Link): Thread = Thread {
+        var worst = 0L
+        var reportAt = SystemClock.elapsedRealtime()
+        while (running) {
+            val frame = try {
+                videoQueue.take()
+            } catch (interrupted: InterruptedException) {
+                break
+            }
+            val started = SystemClock.elapsedRealtime()
+            try {
+                session.send(Proto.T_VIDEO_FRAME, frame)
+            } catch (error: Exception) {
+                AppLog.line("Video send stopped: ${error.message}")
+                break
+            }
+            val took = SystemClock.elapsedRealtime() - started
+            if (took > worst) worst = took
+            val now = SystemClock.elapsedRealtime()
+            if (now - reportAt >= 1_000) {
+                if (worst >= 40) AppLog.line("send blocked $worst ms (network queue)")
+                worst = 0
+                reportAt = now
+            }
+        }
+    }.also { it.start() }
 
     /** Short side is limited by the quality choice; the long side keeps native proportions. */
     private fun captureSize(maxWidth: Int, maxHeight: Int): Pair<Int, Int> {

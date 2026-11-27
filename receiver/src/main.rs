@@ -251,6 +251,7 @@ fn serve(
     let mut received = 0u64;
     let mut window_start = Instant::now();
     let mut frames_in_window = 0u32;
+    let mut last_seq = frame_seq.load(Ordering::Relaxed);
 
     loop {
         let body = read_frame(&mut stream, MAX_BODY)?;
@@ -310,9 +311,17 @@ fn serve(
                     ));
                 }
                 if window_start.elapsed() >= Duration::from_secs(1) {
-                    let fps = frames_in_window as f64 / window_start.elapsed().as_secs_f64();
+                    let elapsed = window_start.elapsed();
+                    let in_fps = frames_in_window as f64 / elapsed.as_secs_f64();
+                    // frame_seq is bumped by the decoder thread, so this is the decode rate: when
+                    // it lags the input rate the queue is growing and delay accumulates.
+                    let now_seq = frame_seq.load(Ordering::Relaxed);
+                    let dec_fps = now_seq.saturating_sub(last_seq) as f64 / elapsed.as_secs_f64();
+                    last_seq = now_seq;
                     let (w, h) = video_config.unwrap();
-                    shared.set_status(format!("{peer} — {w}x{h} — {fps:.0} fps"));
+                    shared.set_status(format!(
+                        "{peer} — {w}x{h} — in {in_fps:.0} / dec {dec_fps:.0} fps"
+                    ));
                     frames_in_window = 0;
                     window_start = Instant::now();
                 }
@@ -529,6 +538,9 @@ impl FfmpegBuilder {
                 "-hide_banner",
                 "-loglevel",
                 "error",
+                // NOTE: -fflags nobuffer was tried here and silently produced zero rawvideo output
+                // on a piped Annex-B stream (verified: 0 bytes vs 1 frame without it), so it must
+                // not come back. Latency is bounded elsewhere: small socket buffer + drop-stale.
                 "-flags",
                 "low_delay",
                 "-probesize",
@@ -826,6 +838,50 @@ impl ViewGoApp {
         }
         true
     }
+
+    /// Scales the newest frame into the mirror viewport's area and refreshes the texture.
+    /// Kept in one method so the picture can be drawn from the dedicated mirror window.
+    fn update_picture(&mut self, mirror_ui: &mut egui::Ui, ctx: &egui::Context) {
+        let avail = mirror_ui.available_size();
+        let area = ((avail.x.max(1.0)) as usize, (avail.y.max(1.0)) as usize);
+        let fresh = self.take_frame();
+        if (fresh || self.area != area) && self.last.is_some() {
+            let (frame, fw, fh) = self.last.as_ref().unwrap();
+            let (dw, dh) = fit_size(*fw, *fh, area.0, area.1);
+            if dw > 0 && dh > 0 {
+                if self.scaled.len() != dw * dh {
+                    self.scaled.resize(dw * dh, 0);
+                }
+                self.scaled.fill(0);
+                scale_fit_bgra(frame, *fw, *fh, &mut self.scaled, dw, dh);
+                let pixels: Vec<egui::Color32> = self
+                    .scaled
+                    .iter()
+                    .map(|&p| {
+                        egui::Color32::from_rgb(
+                            ((p >> 16) & 0xff) as u8,
+                            ((p >> 8) & 0xff) as u8,
+                            (p & 0xff) as u8,
+                        )
+                    })
+                    .collect();
+                let image = egui::ColorImage {
+                    size: [dw, dh],
+                    source_size: egui::vec2(dw as f32, dh as f32),
+                    pixels,
+                };
+                match &mut self.texture {
+                    Some(handle) => handle.set(image, egui::TextureOptions::LINEAR),
+                    None => {
+                        self.texture =
+                            Some(ctx.load_texture("mirror", image, egui::TextureOptions::LINEAR))
+                    }
+                }
+                self.tex_size = (dw, dh);
+                self.area = area;
+            }
+        }
+    }
 }
 
 impl eframe::App for ViewGoApp {
@@ -944,51 +1000,17 @@ impl eframe::App for ViewGoApp {
             });
         });
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            let avail = ui.available_size();
-            let area = ((avail.x.max(1.0)) as usize, (avail.y.max(1.0)) as usize);
-            let fresh = self.take_frame();
-            if (fresh || self.area != area) && self.last.is_some() {
-                let (frame, fw, fh) = self.last.as_ref().unwrap();
-                let (dw, dh) = fit_size(*fw, *fh, area.0, area.1);
-                if dw > 0 && dh > 0 {
-                    if self.scaled.len() != dw * dh {
-                        self.scaled.resize(dw * dh, 0);
-                    }
-                    self.scaled.fill(0);
-                    scale_fit_bgra(frame, *fw, *fh, &mut self.scaled, dw, dh);
-                    let pixels: Vec<egui::Color32> = self
-                        .scaled
-                        .iter()
-                        .map(|&p| {
-                            egui::Color32::from_rgb(
-                                ((p >> 16) & 0xff) as u8,
-                                ((p >> 8) & 0xff) as u8,
-                                (p & 0xff) as u8,
-                            )
-                        })
-                        .collect();
-                    let image = egui::ColorImage {
-                        size: [dw, dh],
-                        source_size: egui::vec2(dw as f32, dh as f32),
-                        pixels,
-                    };
-                    match &mut self.texture {
-                        Some(handle) => handle.set(image, egui::TextureOptions::LINEAR),
-                        None => {
-                            self.texture = Some(ctx.load_texture(
-                                "mirror",
-                                image,
-                                egui::TextureOptions::LINEAR,
-                            ))
-                        }
-                    }
-                    self.tex_size = (dw, dh);
-                    self.area = area;
-                }
-            }
-
-            ui.with_layout(
+        // The picture lives in its own borderless window so OBS can window-capture it clean and
+        // show it fullscreen; this window stays a control panel with no video.
+        let mirror = egui::ViewportId::from_hash_of("viewgo-mirror");
+        let builder = egui::ViewportBuilder::default()
+            .with_title("ViewGo Mirror")
+            .with_decorations(false)
+            .with_inner_size([540.0, 960.0])
+            .with_min_inner_size([240.0, 420.0]);
+        ctx.show_viewport_immediate(mirror, builder, |mirror_ui, _| {
+            self.update_picture(mirror_ui, &ctx);
+            mirror_ui.with_layout(
                 egui::Layout::centered_and_justified(egui::Direction::TopDown),
                 |ui| match (&self.texture, self.tex_size) {
                     (Some(tex), (dw, dh)) if dw > 0 && dh > 0 => {
@@ -997,22 +1019,47 @@ impl eframe::App for ViewGoApp {
                     }
                     _ => {
                         ui.vertical_centered(|ui| {
-                            ui.add_space(50.0);
+                            ui.add_space(40.0);
                             ui.label(
                                 egui::RichText::new("Waiting for a phone")
-                                    .size(26.0)
+                                    .size(24.0)
                                     .color(MUTED),
                             );
-                            ui.add_space(12.0);
+                            ui.add_space(10.0);
                             ui.label(
                                 egui::RichText::new(
                                     "Type the pairing code on your phone, on the same Wi-Fi.",
                                 )
-                                .size(15.0)
+                                .size(14.0)
                                 .color(MUTED),
                             );
                         });
                     }
+                },
+            );
+        });
+
+        egui::CentralPanel::default().show(ui, |ui| {
+            ui.with_layout(
+                egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(40.0);
+                        ui.label(
+                            egui::RichText::new("The picture is in the ViewGo Mirror window")
+                                .size(24.0)
+                                .strong()
+                                .color(INK),
+                        );
+                        ui.add_space(14.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "Point OBS at that window and show it fullscreen.\nThis window keeps the pairing code, session status and log.",
+                            )
+                            .size(15.0)
+                            .color(MUTED),
+                        );
+                    });
                 },
             );
         });
