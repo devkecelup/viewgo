@@ -18,6 +18,8 @@ import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.Editable
 import android.text.InputFilter
 import android.text.InputType
@@ -53,6 +55,12 @@ class MainActivity : Activity() {
     private lateinit var statusDot: View
     private lateinit var primaryButton: Button
     private var mirroring = false
+
+    // Search state: one discovery at a time, and a deadline so a missing laptop
+    // falls back to the manual IP field instead of spinning forever.
+    private var searching = false
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var discoveryListener: NsdManager.DiscoveryListener? = null
 
     // Option state — chip rows and a switch replace the old spinners.
     private var qualityIndex = 0
@@ -157,11 +165,44 @@ class MainActivity : Activity() {
             addView(
                 TextView(this@MainActivity).apply {
                     text = label
-                    textSize = 14f
-                    setTextColor(Color.parseColor(C_MUTED))
+                    textSize = 15f
+                    setTextColor(Color.parseColor(C_INK))
+                    typeface = Typeface.DEFAULT_BOLD
                 },
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                     marginStart = dp(8)
+                },
+            )
+        }
+
+    /** Numbered step heading: circular accent badge + bold title. */
+    private fun stepHead(number: Int, title: String): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = number.toString()
+                    textSize = 13f
+                    gravity = Gravity.CENTER
+                    setTextColor(Color.WHITE)
+                    typeface = Typeface.DEFAULT_BOLD
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(Color.parseColor(C_ACCENT))
+                    }
+                },
+                LinearLayout.LayoutParams(dp(24), dp(24)),
+            )
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = title
+                    textSize = 18f
+                    setTextColor(Color.parseColor(C_INK))
+                    typeface = Typeface.DEFAULT_BOLD
+                },
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    marginStart = dp(10)
                 },
             )
         }
@@ -275,13 +316,20 @@ class MainActivity : Activity() {
         return ripple(bg, Color.parseColor("#1A0F7B4F"))
     }
 
-    private fun searchButton(): TextView = TextView(this).apply {
-        setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_search, 0, 0, 0)
-        gravity = Gravity.CENTER
-        background = ripple(shape(12, C_ACCENT), Color.parseColor("#40FFFFFF"))
-        contentDescription = "Find laptop"
-        setPadding(dp(12), dp(12), dp(12), dp(12))
-        setOnClickListener { discoverReceiver() }
+    /** Discovery deadline: stop the scan and point the user at the manual IP field. */
+    private val searchTimeout = Runnable {
+        val listener = discoveryListener ?: return@Runnable
+        runCatching { (getSystemService(NSD_SERVICE) as NsdManager).stopServiceDiscovery(listener) }
+        finishSearch()
+        laptopStatus.setTextColor(Color.parseColor(C_MUTED))
+        laptopStatus.text = "No laptop found on this Wi-Fi. Type its IP address below."
+        setStatus("No laptop found. Enter the laptop's IP address manually.", error = true)
+    }
+
+    private fun finishSearch() {
+        searching = false
+        discoveryListener = null
+        mainHandler.removeCallbacks(searchTimeout)
     }
 
     private fun setStatus(text: String, error: Boolean = false) {
@@ -368,52 +416,64 @@ class MainActivity : Activity() {
             )
         }
         content.addView(header, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        content.addView(View(this), ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(18)))
+        content.addView(View(this), ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(20)))
 
-        // Connection card: find the laptop, then enter the code.
-        val connectionCard = card().apply {
-            addView(sectionHead(R.drawable.ic_laptop, "Connect to laptop"))
+        // Step 1: find the laptop. Two ways: tap the search button, or type the IP manually.
+        val step1 = card().apply {
+            addView(stepHead(1, "Find your laptop"))
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = "Tap search to find the laptop on Wi-Fi, or type its IP address below."
+                    textSize = 14f
+                    setTextColor(Color.parseColor(C_MUTED))
+                    setPadding(0, dp(6), 0, 0)
+                },
+                cardGap(),
+            )
 
-            val laptopRow = LinearLayout(this@MainActivity).apply {
+            val searchPrimary = Button(this@MainActivity).apply {
+                text = "Search laptop"
+                setOnClickListener { discoverReceiver() }
+            }
+            paintButton(searchPrimary, true, R.drawable.ic_search)
+            addView(searchPrimary, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply {
+                topMargin = dp(14)
+            })
+
+            val divider = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 addView(
-                    ImageView(this@MainActivity).apply {
-                        setImageResource(R.drawable.ic_laptop)
-                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                    },
-                    LinearLayout.LayoutParams(dp(22), dp(22)),
-                )
-                laptopStatus = TextView(this@MainActivity).apply {
-                    text = "Tap search, or type the laptop's IP address below."
-                    textSize = 15f
-                    setTextColor(Color.parseColor(C_MUTED))
-                    maxLines = 2
-                    ellipsize = android.text.TextUtils.TruncateAt.END
-                }
-                addView(
-                    laptopStatus,
-                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                        marginStart = dp(10)
-                    },
+                    View(this@MainActivity).apply { background = shape(1, C_BORDER) },
+                    LinearLayout.LayoutParams(0, dp(1), 1f),
                 )
                 addView(
-                    searchButton(),
-                    LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginStart = dp(10) },
+                    TextView(this@MainActivity).apply {
+                        text = "or"
+                        textSize = 13f
+                        setTextColor(Color.parseColor(C_MUTED))
+                        setPadding(dp(12), dp(6), dp(12), dp(6))
+                    },
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+                )
+                addView(
+                    View(this@MainActivity).apply { background = shape(1, C_BORDER) },
+                    LinearLayout.LayoutParams(0, dp(1), 1f),
                 )
             }
-            addView(
-                laptopRow,
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = dp(12) },
-            )
+            addView(divider, cardGap().apply { topMargin = dp(6) })
 
-            addView(optionLabel(R.drawable.ic_laptop, "Laptop IP (IPv4)"), cardGap().apply { topMargin = dp(18) })
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = "Laptop IP address (optional)"
+                    textSize = 15f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(Color.parseColor(C_INK))
+                },
+                cardGap().apply { topMargin = dp(4) },
+            )
             hostField = EditText(this@MainActivity).apply {
                 hint = "192.168.1.24"
-                // Digits plus the two separators a manual address needs; no alphabetic keyboard.
                 keyListener = android.text.method.DigitsKeyListener.getInstance("0123456789.:")
                 filters = arrayOf(InputFilter.LengthFilter(21))
                 setSingleLine()
@@ -425,19 +485,32 @@ class MainActivity : Activity() {
                 onFocusChangeListener = View.OnFocusChangeListener { _, hasFocus ->
                     background = codeBg(hasFocus)
                 }
-                setPadding(dp(16), dp(16), dp(16), dp(16))
+                minHeight = dp(52)
+                setPadding(dp(16), dp(14), dp(16), dp(14))
             }
             addView(hostField, cardGap().apply { topMargin = dp(8) })
             addView(
                 TextView(this@MainActivity).apply {
-                    text = "Optional. Type the laptop's IPv4 address if the search shows an IPv6 one. Add :port only if your receiver uses another port."
-                    textSize = 12f
+                    text = "Add :port only if the receiver uses a custom port."
+                    textSize = 13f
                     setTextColor(Color.parseColor(C_MUTED))
-                    setPadding(0, dp(8), 0, 0)
                 },
+                cardGap(),
             )
 
-            addView(optionLabel(R.drawable.ic_key, "Pairing code"), cardGap().apply { topMargin = dp(18) })
+            laptopStatus = TextView(this@MainActivity).apply {
+                text = "Tap Search laptop, or enter the IP address manually."
+                textSize = 13f
+                setTextColor(Color.parseColor(C_MUTED))
+                setPadding(0, dp(10), 0, 0)
+            }
+            addView(laptopStatus, cardGap())
+        }
+        addCard(content, step1)
+
+        // Step 2: pairing code.
+        val step2 = card().apply {
+            addView(stepHead(2, "Enter pairing code"))
             codeField = EditText(this@MainActivity).apply {
                 hint = "AB3D"
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
@@ -446,7 +519,7 @@ class MainActivity : Activity() {
                 typeface = Typeface.MONOSPACE
                 letterSpacing = 0.28f
                 gravity = Gravity.CENTER
-                textSize = 26f
+                textSize = 28f
                 setTextColor(Color.parseColor(C_INK))
                 setHintTextColor(Color.parseColor(C_MUTED))
                 background = codeBg(false)
@@ -465,46 +538,28 @@ class MainActivity : Activity() {
                         }
                     }
                 })
+                minHeight = dp(56)
                 setPadding(dp(16), dp(16), dp(16), dp(16))
             }
-            addView(codeField, cardGap().apply { topMargin = dp(8) })
+            addView(codeField, cardGap().apply { topMargin = dp(14) })
             addView(
                 TextView(this@MainActivity).apply {
-                    text = "Type the 4-character code shown on your laptop."
-                    textSize = 12f
+                    text = "Type the 4-character code shown on the ViewGo window."
+                    textSize = 13f
                     setTextColor(Color.parseColor(C_MUTED))
                     gravity = Gravity.CENTER
                     setPadding(0, dp(8), 0, 0)
                 },
             )
         }
-        addCard(content, connectionCard)
+        addCard(content, step2)
 
-        // Flow picture and live status.
-        content.addView(
-            ImageView(this).apply {
-                setImageResource(R.drawable.ic_flow)
-                scaleType = ImageView.ScaleType.FIT_CENTER
-                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            },
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(120),
-            ).apply { topMargin = dp(6) },
-        )
-        content.addView(
-            TextView(this).apply {
-                text = "Both devices must be on the same Wi-Fi network."
-                textSize = 13f
-                setTextColor(Color.parseColor(C_MUTED))
-                gravity = Gravity.CENTER
-            },
-            cardGap(),
-        )
-        val statusRow = LinearLayout(this).apply {
+        // Status banner: a compact, scannable summary of what's happening.
+        val statusBanner = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            setPadding(0, dp(8), 0, 0)
+            gravity = Gravity.CENTER_VERTICAL
+            background = shape(14, C_SURFACE)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
             statusDot = View(this@MainActivity).apply {
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.OVAL
@@ -513,11 +568,12 @@ class MainActivity : Activity() {
             }
             addView(
                 statusDot,
-                LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) },
+                LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(10) },
             )
             statusLabel = TextView(this@MainActivity).apply {
-                text = "Start the receiver on your laptop, then find it here."
+                text = "Start the receiver on your laptop, then fill the steps above."
                 textSize = 14f
+                setLineSpacing(dp(2).toFloat(), 1f)
                 setTextColor(Color.parseColor(C_MUTED))
             }
             addView(
@@ -525,7 +581,16 @@ class MainActivity : Activity() {
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
             )
         }
-        content.addView(statusRow, cardGap())
+        content.addView(statusBanner, cardGap().apply { topMargin = dp(6) })
+        content.addView(
+            TextView(this).apply {
+                text = "Both devices must be on the same Wi-Fi network."
+                textSize = 13f
+                setTextColor(Color.parseColor(C_MUTED))
+                gravity = Gravity.CENTER
+            },
+            cardGap().apply { topMargin = dp(8) },
+        )
         content.addView(View(this), cardGap().apply { height = dp(12) })
 
         // Options card: quality, frame rate, share target, audio.
@@ -537,16 +602,16 @@ class MainActivity : Activity() {
                 chipGroup(listOf("1080p", "720p"), qualityIndex) {
                     qualityIndex = it
                 },
-                cardGap().apply { topMargin = dp(6) },
+                cardGap().apply { topMargin = dp(8) },
             )
 
-            addView(optionLabel(R.drawable.ic_flow, "Frame rate"), cardGap().apply { topMargin = dp(16) })
+            addView(optionLabel(R.drawable.ic_flow, "Frame rate"), cardGap().apply { topMargin = dp(20) })
             addView(
                 chipGroup(listOf("30 fps", "60 fps"), fpsIndex) { fpsIndex = it },
-                cardGap().apply { topMargin = dp(6) },
+                cardGap().apply { topMargin = dp(8) },
             )
 
-            addView(optionLabel(R.drawable.ic_apps, "Share"), cardGap().apply { topMargin = dp(16) })
+            addView(optionLabel(R.drawable.ic_apps, "Share"), cardGap().apply { topMargin = dp(20) })
             val shareLabels = if (Build.VERSION.SDK_INT >= 34) {
                 listOf("Whole screen", "One app")
             } else {
@@ -554,19 +619,18 @@ class MainActivity : Activity() {
             }
             addView(
                 chipGroup(shareLabels, shareIndex) { shareIndex = it },
-                cardGap().apply { topMargin = dp(6) },
+                cardGap().apply { topMargin = dp(8) },
             )
 
             addView(
                 switchRow(R.drawable.ic_volume, "Internal audio", audioOn) { audioOn = it },
-                cardGap().apply { topMargin = dp(16) },
+                cardGap().apply { topMargin = dp(20) },
             )
 
             addView(
                 TextView(this@MainActivity).apply {
-                    text = "1080p is best effort. 60 fps needs a stronger phone and more bitrate; " +
-                        "if the phone gets hot, use 720p."
-                    textSize = 12f
+                    text = "1080p and 60 fps are best effort. If the phone gets hot, switch to 720p or 30 fps."
+                    textSize = 13f
                     setTextColor(Color.parseColor(C_MUTED))
                     setPadding(0, dp(14), 0, 0)
                 },
@@ -641,6 +705,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacks(searchTimeout)
         runCatching { unregisterReceiver(stateReceiver) }
         super.onDestroy()
     }
@@ -729,15 +794,18 @@ class MainActivity : Activity() {
     }
 
     private fun discoverReceiver() {
+        if (searching) return
+        searching = true
         laptopStatus.setTextColor(Color.parseColor(C_MUTED))
         laptopStatus.text = "Searching your Wi-Fi for the laptop..."
         setStatus("Searching local Wi-Fi...")
         val manager = getSystemService(NSD_SERVICE) as NsdManager
-        manager.discoverServices("_viewgo._tcp.", NsdManager.PROTOCOL_DNS_SD, object : NsdManager.DiscoveryListener {
+        val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(type: String) = Unit
             override fun onStartDiscoveryFailed(type: String, error: Int) {
                 manager.stopServiceDiscovery(this)
                 runOnUiThread {
+                    finishSearch()
                     laptopStatus.text = "Wi-Fi discovery failed (code $error)."
                     setStatus("Wi-Fi discovery failed. Type the laptop's IP address instead.", error = true)
                 }
@@ -754,6 +822,7 @@ class MainActivity : Activity() {
                     manager.resolveService(service, object : NsdManager.ResolveListener {
                         override fun onResolveFailed(service: NsdServiceInfo, error: Int) {
                             runOnUiThread {
+                                finishSearch()
                                 laptopStatus.text = "Could not resolve laptop (code $error)."
                                 setStatus("Could not resolve the laptop. Type its IP address instead.", error = true)
                             }
@@ -765,6 +834,7 @@ class MainActivity : Activity() {
                             val address = preferredIpv4(resolved)
                             if (address == null) {
                                 runOnUiThread {
+                                    finishSearch()
                                     laptopStatus.setTextColor(Color.parseColor(C_ERROR))
                                     laptopStatus.text = "Found ${resolved.serviceName}, but only over IPv6."
                                     setStatus("Type the laptop's IPv4 address above.", error = true)
@@ -773,6 +843,7 @@ class MainActivity : Activity() {
                             }
                             val target = if (resolved.port == 47810) address else "$address:${resolved.port}"
                             runOnUiThread {
+                                finishSearch()
                                 hostField.setText(target)
                                 laptopStatus.setTextColor(Color.parseColor(C_ACCENT))
                                 laptopStatus.text = "Found ${resolved.serviceName} at $address. Enter the code."
@@ -783,12 +854,16 @@ class MainActivity : Activity() {
                     })
                 } catch (error: UnsupportedOperationException) {
                     runOnUiThread {
+                        finishSearch()
                         laptopStatus.text = "This Android version cannot resolve local services."
                         setStatus("Discovery unavailable. Type the laptop's IP address instead.", error = true)
                     }
                 }
             }
-        })
+        }
+        discoveryListener = listener
+        mainHandler.postDelayed(searchTimeout, SEARCH_TIMEOUT_MS)
+        manager.discoverServices("_viewgo._tcp.", NsdManager.PROTOCOL_DNS_SD, listener)
     }
 
     private fun preferredIpv4(service: NsdServiceInfo): String? {
@@ -805,6 +880,7 @@ class MainActivity : Activity() {
     companion object {
         private const val REQUEST_CAPTURE = 1001
         private const val PREF_TARGET = "target"
+        private const val SEARCH_TIMEOUT_MS = 8_000L
     }
 
 }
