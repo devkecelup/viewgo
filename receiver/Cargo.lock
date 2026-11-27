@@ -3728,6 +3728,7 @@ dependencies = [
  "aes-gcm",
  "eframe",
  "hmac",
+ "if-addrs",
  "mdns-sd",
  "pbkdf2",
  "rand",

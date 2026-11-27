@@ -38,6 +38,49 @@ object Proto {
     val MAGIC = byteArrayOf('V'.code.toByte(), 'G'.code.toByte(), 'M'.code.toByte(), 'R'.code.toByte())
 }
 
+/**
+ * Parses a manually typed laptop address: dotted IPv4 with an optional ":port".
+ *
+ * The receiver listens on IPv4 only, so IPv6 literals and host names are rejected rather than
+ * handed to a resolver that would silently pick an address the laptop is not bound to.
+ */
+fun parseTarget(input: String, defaultPort: Int = 47810): Pair<String, Int>? {
+    val text = input.trim()
+    if (text.isEmpty()) return null
+
+    val hostPart: String
+    val portPart: String?
+    val colon = text.lastIndexOf(':')
+    if (colon >= 0) {
+        // More than one colon means an IPv6 literal.
+        if (text.indexOf(':') != colon) return null
+        hostPart = text.substring(0, colon)
+        portPart = text.substring(colon + 1)
+    } else {
+        hostPart = text
+        portPart = null
+    }
+
+    val octets = hostPart.split('.')
+    if (octets.size != 4) return null
+    val numbers = ArrayList<Int>(4)
+    for (octet in octets) {
+        if (octet.isEmpty() || octet.length > 3 || octet.any { it !in '0'..'9' }) return null
+        val value = octet.toIntOrNull() ?: return null
+        if (value > 255) return null
+        numbers.add(value)
+    }
+    if (numbers[0] == 0) return null // 0.x.x.x is never a usable laptop address
+
+    val port = when {
+        portPart == null -> defaultPort
+        portPart.isEmpty() || portPart.length > 5 || portPart.any { it !in '0'..'9' } -> return null
+        else -> portPart.toIntOrNull()?.takeIf { it in 1..65535 } ?: return null
+    }
+    // Rebuild without leading zeros so Java's InetAddress cannot read an octet as octal.
+    return numbers.joinToString(".") to port
+}
+
 /** Normalises user input: uppercase, strips separators, maps Crockford look-alikes. */
 fun normalizeCode(input: String): String? {
     val out = StringBuilder()

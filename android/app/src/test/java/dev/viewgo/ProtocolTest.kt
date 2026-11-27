@@ -33,5 +33,22 @@ class ProtocolTest {
         assertNull(normalizeCode("AB3D!"))
     }
 
+    @Test
+    fun manualTargetParsing() {
+        assertEquals("192.168.1.24" to 47810, parseTarget(" 192.168.1.24 "))
+        assertEquals("10.0.0.7" to 50000, parseTarget("10.0.0.7:50000"))
+        assertEquals("192.168.1.24" to 47810, parseTarget("192.168.001.024"))
+
+        assertNull(parseTarget(""))
+        assertNull(parseTarget("192.168.1"))
+        assertNull(parseTarget("192.168.1.256"))
+        assertNull(parseTarget("192.168.1.24:0"))
+        assertNull(parseTarget("192.168.1.24:70000"))
+        assertNull(parseTarget("0.0.0.0"))
+        assertNull(parseTarget("fe80::1"))
+        assertNull(parseTarget("[fe80::1]:47810"))
+        assertNull(parseTarget("laptop.local"))
+    }
+
     private fun ByteArray.toHex() = joinToString("") { "%02x".format(it) }
 }

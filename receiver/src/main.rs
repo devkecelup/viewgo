@@ -5,9 +5,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::net::{IpAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream, UdpSocket};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -17,6 +17,7 @@ use eframe::egui;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 
 const DEFAULT_PORT: u16 = 47810;
+const DEFAULT_VOLUME: u8 = 70;
 const CODE_TTL: Duration = Duration::from_secs(120);
 const ATTEMPT_WINDOW: Duration = Duration::from_secs(60);
 const MAX_ATTEMPTS_PER_IP: u32 = 5;
@@ -74,6 +75,11 @@ struct Shared {
     started: Mutex<Option<Instant>>,
     /// The live client socket, so the window can stop a session from the laptop.
     client: Mutex<Option<TcpStream>>,
+    /// Phone audio gain in percent; read for every PCM chunk so the slider applies live.
+    volume: AtomicU8,
+    /// Frames the window actually painted. The status compares it with the decode rate so a slow
+    /// display path is visible instead of looking like a slow network.
+    drawn: AtomicU64,
 }
 
 impl Shared {
@@ -124,7 +130,10 @@ struct Ffmpeg {
 
 struct AudioPlayer {
     child: Child,
-    stdin: BufWriter<std::process::ChildStdin>,
+    /// Bounded PCM queue. The writer thread keeps ffplay fed without ever blocking the network
+    /// loop; when the queue is full the newest chunk is dropped instead of stalling video.
+    sender: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
+    writer: Option<thread::JoinHandle<()>>,
 }
 
 /// 44-byte PCM WAV header written once before the first PCM frame: it carries the sample rate and
@@ -165,6 +174,8 @@ fn main() {
         status: Mutex::new("Waiting for a phone".to_string()),
         started: Mutex::new(None),
         client: Mutex::new(None),
+        volume: AtomicU8::new(DEFAULT_VOLUME),
+        drawn: AtomicU64::new(0),
     });
 
     let latest = Arc::new(Mutex::new(Latest::new()));
@@ -182,8 +193,21 @@ fn main() {
     };
 
     let code = shared.issue_code();
-    let _mdns = publish_receiver(port);
+    let addresses = local_ipv4_addresses();
+    let _mdns = publish_receiver(port, &addresses);
     log(format!("ViewGo receiver listening on port {port}"));
+    if addresses.is_empty() {
+        log("No IPv4 address found; falling back to automatic mDNS addresses");
+    } else {
+        log(format!(
+            "Local IPv4: {}",
+            addresses
+                .iter()
+                .map(|ip| ip.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     log(format!("Pairing code: {code}  (valid 120 seconds)"));
 
     if let Some(listener) = listener {
@@ -194,7 +218,7 @@ fn main() {
         thread::spawn(move || accept_loop(listener, shared, latest, spares, frame_seq));
     }
 
-    run_gui(shared, latest, spares, frame_seq, port);
+    run_gui(shared, latest, spares, frame_seq, port, primary_ipv4(&addresses));
 }
 
 fn accept_loop(
@@ -272,12 +296,19 @@ fn serve(
     // Expose a handle to the live socket so the window can stop this session.
     *shared.client.lock().unwrap() = Some(stream.try_clone()?);
 
-    let mut builder = FfmpegBuilder::default();
+    let mut builder = FfmpegBuilder::new(
+        Arc::clone(&latest),
+        Arc::clone(&spares),
+        Arc::clone(&frame_seq),
+    );
     let mut video_config: Option<(u16, u16)> = None;
     let mut received = 0u64;
     let mut window_start = Instant::now();
     let mut frames_in_window = 0u32;
+    let mut bytes_in_window = 0u64;
     let mut last_seq = frame_seq.load(Ordering::Relaxed);
+    let mut last_drawn = shared.drawn.load(Ordering::Relaxed);
+    let mut last_status_log = Instant::now();
 
     loop {
         let body = read_frame(&mut stream, MAX_BODY)?;
@@ -299,17 +330,12 @@ fn serve(
                 let dimensions_changed = video_config != Some((width, height));
                 video_config = Some((width, height));
                 shared.set_status(format!("Connected {peer} — {width}x{height}"));
-                builder.start(
-                    width,
-                    height,
-                    Arc::clone(&latest),
-                    Arc::clone(&spares),
-                    Arc::clone(&frame_seq),
-                )?;
+                builder.start(width, height)?;
                 if dimensions_changed {
                     received = 0;
                     window_start = Instant::now();
                     frames_in_window = 0;
+                    bytes_in_window = 0;
                     let mut guard = latest.lock().unwrap();
                     guard.frame = None;
                     guard.width = 0;
@@ -330,6 +356,9 @@ fn serve(
                 }
                 received += 1;
                 frames_in_window += 1;
+                // Video bytes only: the status shows whether the link actually delivers the
+                // bitrate the phone asked for, which separates a slow network from a slow encoder.
+                bytes_in_window += plain.len() as u64;
                 if builder.write(&plain[10..]).is_err() {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::BrokenPipe,
@@ -344,11 +373,27 @@ fn serve(
                     let now_seq = frame_seq.load(Ordering::Relaxed);
                     let dec_fps = now_seq.saturating_sub(last_seq) as f64 / elapsed.as_secs_f64();
                     last_seq = now_seq;
+                    // The window bumps `drawn` for every frame it actually painted. A decode rate
+                    // at the input rate with a lower draw rate means the display path is the
+                    // bottleneck, not the network or the decoder.
+                    let now_drawn = shared.drawn.load(Ordering::Relaxed);
+                    let draw_fps =
+                        now_drawn.saturating_sub(last_drawn) as f64 / elapsed.as_secs_f64();
+                    last_drawn = now_drawn;
+                    let mbps = bytes_in_window as f64 * 8.0 / elapsed.as_secs_f64() / 1_000_000.0;
                     let (w, h) = video_config.unwrap();
-                    shared.set_status(format!(
-                        "{peer} — {w}x{h} — in {in_fps:.0} / dec {dec_fps:.0} fps"
-                    ));
+                    let line = format!(
+                        "{peer} — {w}x{h} — in {in_fps:.0} / dec {dec_fps:.0} / draw {draw_fps:.0} fps — {mbps:.1} Mbps"
+                    );
+                    shared.set_status(line.clone());
+                    // A periodic copy in the log lets a session be diagnosed afterwards, when the
+                    // live status line is already replaced.
+                    if last_status_log.elapsed() >= Duration::from_secs(10) {
+                        last_status_log = Instant::now();
+                        log(line);
+                    }
                     frames_in_window = 0;
+                    bytes_in_window = 0;
                     window_start = Instant::now();
                 }
             }
@@ -377,7 +422,8 @@ fn serve(
             }
             T_AUDIO_FRAME => {
                 if plain.len() > 1 && plain.len() <= 16 * 1024 {
-                    builder.write_audio(&plain[1..]);
+                    let volume = shared.volume.load(Ordering::Relaxed);
+                    builder.write_audio(&plain[1..], volume);
                 }
             }
             T_LOG => {
@@ -526,71 +572,112 @@ fn handshake(
     Ok(Handshake { key })
 }
 
-#[derive(Default)]
 struct FfmpegBuilder {
     process: Option<Ffmpeg>,
     audio: Option<AudioPlayer>,
+    /// Stream size the current decoder was started for, so a repeated config does not restart it.
     dimensions: Option<(usize, usize)>,
+    /// Stream size to rebuild the decoder with after a hardware-decode failure.
+    stream: Option<(u16, u16)>,
+    /// Whether the decoder may use the platform hardware decoder. Cleared for good once a
+    /// hardware attempt fails; `VIEWGO_HWACCEL=0` starts without it.
+    hwaccel: bool,
+    latest: Arc<Mutex<Latest>>,
+    spares: Arc<Mutex<Vec<Vec<u8>>>>,
+    frame_seq: Arc<AtomicU64>,
+    audio_dropped: u64,
+}
+
+/// ffmpeg command line for decoding the phone's Annex-B H.264 into `out_w`x`out_h` BGRA frames.
+///
+/// `hwaccel` adds `-hwaccel auto`, which lets ffmpeg pick the platform decoder (d3d11va on
+/// Windows) and fall back to software when the driver offers nothing usable. Measured on a
+/// 1080x2400 High profile stream: 250 fps decoded instead of 154 fps in software, with
+/// byte-identical output.
+fn decoder_args(hwaccel: bool, out_w: usize, out_h: usize) -> Vec<String> {
+    let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error"]
+        .map(String::from)
+        .to_vec();
+    if hwaccel {
+        args.extend(["-hwaccel", "auto"].map(String::from));
+    }
+    args.extend(
+        [
+            // NOTE: -fflags nobuffer was tried here and silently produced zero rawvideo output on a
+            // piped Annex-B stream (verified: 0 bytes vs 1 frame without it), so it must not come
+            // back. Latency is bounded elsewhere: small socket buffer + drop-stale.
+            "-flags",
+            "low_delay",
+            "-probesize",
+            "32",
+            "-analyzeduration",
+            "0",
+            "-f",
+            "h264",
+            "-i",
+            "pipe:0",
+            "-an",
+            "-sn",
+            "-dn",
+            "-fps_mode",
+            "passthrough",
+            "-vf",
+            &format!("scale={out_w}:{out_h}"),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgra",
+            "pipe:1",
+        ]
+        .map(String::from),
+    );
+    args
 }
 
 impl FfmpegBuilder {
-    fn start(
-        &mut self,
-        width: u16,
-        height: u16,
+    fn new(
         latest: Arc<Mutex<Latest>>,
         spares: Arc<Mutex<Vec<Vec<u8>>>>,
         frame_seq: Arc<AtomicU64>,
-    ) -> std::io::Result<()> {
+    ) -> Self {
+        Self {
+            process: None,
+            audio: None,
+            dimensions: None,
+            stream: None,
+            hwaccel: cfg!(windows)
+                && env::var("VIEWGO_HWACCEL")
+                    .map(|value| value != "0")
+                    .unwrap_or(true),
+            latest,
+            spares,
+            frame_seq,
+            audio_dropped: 0,
+        }
+    }
+
+    fn start(&mut self, width: u16, height: u16) -> std::io::Result<()> {
         if self.process.is_some() {
             if self.dimensions == Some((width as usize, height as usize)) {
                 return Ok(());
             }
-            let old = self.process.take();
-            drop(old);
+            drop(self.process.take());
             self.dimensions = None;
         }
-        let latest_for_reader = Arc::clone(&latest);
-        let spares_for_reader = Arc::clone(&spares);
-        let frame_seq_for_reader = Arc::clone(&frame_seq);
+        let latest_for_reader = Arc::clone(&self.latest);
+        let spares_for_reader = Arc::clone(&self.spares);
+        let frame_seq_for_reader = Arc::clone(&self.frame_seq);
         let ffmpeg = env::var("FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string());
-        // shortcut: H.264 decoding runs in software through ffmpeg; move to Media Foundation
-        // (D3D11VA) if the target laptop cannot decode 1080p in real time.
-        // scale=WxH pins the rawvideo output to exactly the dimensions the reader will consume:
+        // The pipe carries raw BGRA, so a 1080x2400 phone frame is ~10 MB: at 30 fps that is
+        // ~310 MB/s through ffmpeg stdout, the reader thread and the buffer pool, which is what
+        // makes the picture stutter on a modest laptop. Decode down to at most DECODE_MAX on the
+        // long side and let the mirror window scale the (much smaller) frame the rest of the way.
+        // scale=WxH also pins the rawvideo output to exactly the dimensions the reader consumes:
         // an encoder that rounds a non-macroblock-aligned size (e.g. 1080 -> 1088) would otherwise
         // shift every frame and garble the picture.
-        let out_size = format!("scale={}:{}", width, height);
+        let (out_w, out_h) = decode_size(width as usize, height as usize);
         let mut child = Command::new(ffmpeg)
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                // NOTE: -fflags nobuffer was tried here and silently produced zero rawvideo output
-                // on a piped Annex-B stream (verified: 0 bytes vs 1 frame without it), so it must
-                // not come back. Latency is bounded elsewhere: small socket buffer + drop-stale.
-                "-flags",
-                "low_delay",
-                "-probesize",
-                "32",
-                "-analyzeduration",
-                "0",
-                "-f",
-                "h264",
-                "-i",
-                "pipe:0",
-                "-an",
-                "-sn",
-                "-dn",
-                "-fps_mode",
-                "passthrough",
-                "-vf",
-                &out_size,
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "bgra",
-                "pipe:1",
-            ])
+            .args(decoder_args(self.hwaccel, out_w, out_h))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -598,7 +685,7 @@ impl FfmpegBuilder {
 
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
-        let (w, h) = (width as usize, height as usize);
+        let (w, h) = (out_w, out_h);
 
         thread::spawn(move || {
             let mut reader = BufReader::with_capacity(1 << 20, stdout);
@@ -635,21 +722,45 @@ impl FfmpegBuilder {
             child,
             stdin: BufWriter::with_capacity(1 << 20, stdin),
         });
-        self.dimensions = Some((w, h));
+        // Remember the stream size (not the decoded size) so a repeated config for the same
+        // stream does not restart the decoder, and so a failed hardware start can be retried in
+        // software at the same size.
+        self.dimensions = Some((width as usize, height as usize));
+        self.stream = Some((width, height));
         Ok(())
     }
 
     fn write(&mut self, annex_b: &[u8]) -> std::io::Result<()> {
-        let process = self.process.as_mut().expect("decoder started");
-        if let Err(error) = process
-            .stdin
-            .write_all(annex_b)
-            .and_then(|_| process.stdin.flush())
-        {
-            self.process.take();
-            return Err(error);
+        let outcome = match self.process.as_mut() {
+            Some(process) => process
+                .stdin
+                .write_all(annex_b)
+                .and_then(|_| process.stdin.flush()),
+            None => return Ok(()),
+        };
+        let Err(error) = outcome else {
+            return Ok(());
+        };
+        self.process = None;
+        // A hardware decoder that the driver advertises but cannot run exits at the first frame.
+        // Software decoding keeps the session alive instead of ending it; the picture recovers at
+        // the next keyframe (the phone sends one every two seconds).
+        if let Some((width, height)) = self.software_retry() {
+            log("Hardware video decode failed; continuing in software");
+            self.start(width, height)?;
+            return Ok(());
         }
-        Ok(())
+        Err(error)
+    }
+
+    /// Software fallback after a hardware decode failure: returns the stream size to restart the
+    /// decoder with, at most once.
+    fn software_retry(&mut self) -> Option<(u16, u16)> {
+        if !self.hwaccel {
+            return None;
+        }
+        self.hwaccel = false;
+        self.stream
     }
 
     fn start_audio(&mut self, sample_rate: u32, channels: u8) -> std::io::Result<()> {
@@ -696,7 +807,27 @@ impl FfmpegBuilder {
             let _ = child.kill();
             return Err(error);
         }
-        self.audio = Some(AudioPlayer { stdin, child });
+        // 4 chunks ≈ 85 ms of audio: enough to ride out a hiccup, small enough that audio stays in
+        // step with the picture. A full queue means playback is behind: drop new chunks rather
+        // than block the network thread, which also carries video.
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Vec<u8>>(4);
+        let writer = thread::spawn(move || {
+            while let Ok(pcm) = receiver.recv() {
+                if stdin
+                    .write_all(&pcm)
+                    .and_then(|_| stdin.flush())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        self.audio_dropped = 0;
+        self.audio = Some(AudioPlayer {
+            child,
+            sender: Some(sender),
+            writer: Some(writer),
+        });
         Ok(())
     }
 
@@ -705,32 +836,35 @@ impl FfmpegBuilder {
         self.start_audio(sample_rate, channels)
     }
 
-    fn write_audio(&mut self, pcm: &[u8]) {
-        let failed = match self.audio.as_mut() {
-            None => return,
-            Some(audio) => match audio.child.try_wait() {
-                Ok(Some(_)) => true,
-                Err(_) => true,
-                Ok(None) => audio
-                    .stdin
-                    .write_all(pcm)
-                    .and_then(|_| audio.stdin.flush())
-                    .is_err(),
-            },
+    fn write_audio(&mut self, pcm: &[u8], volume: u8) {
+        let Some(audio) = self.audio.as_mut() else {
+            return;
         };
-        if failed {
-            self.audio.take();
-            log(
-                "Audio output stopped: ffplay exited or the Windows playback device is unavailable",
-            );
+        let Some(sender) = audio.sender.as_ref() else {
+            return;
+        };
+        let mut chunk = pcm.to_vec();
+        apply_gain(&mut chunk, volume);
+        match sender.try_send(chunk) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                self.audio_dropped += 1;
+                if self.audio_dropped % 50 == 1 {
+                    log("Audio output is behind; dropping audio chunks to keep video smooth");
+                }
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                self.audio.take();
+                log(
+                    "Audio output stopped: ffplay exited or the Windows playback device is unavailable",
+                );
+            }
         }
     }
 
     fn kill_audio(&mut self) {
-        if let Some(mut audio) = self.audio.take() {
-            let _ = audio.child.kill();
-            let _ = audio.child.wait();
-        }
+        // Dropping AudioPlayer closes the queue, kills ffplay and joins the writer thread.
+        self.audio.take();
     }
 }
 
@@ -749,8 +883,31 @@ impl Drop for Ffmpeg {
 
 impl Drop for AudioPlayer {
     fn drop(&mut self) {
+        // Closing the queue lets the writer finish; killing ffplay unblocks a writer stuck on a
+        // full pipe, and the join keeps teardown deterministic.
+        self.sender.take();
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
+    }
+}
+
+/// Applies a percentage gain to signed 16-bit little-endian PCM in place. 100% is untouched,
+/// 0% is silence; values stay inside the i16 range because `volume <= 100`.
+fn apply_gain(pcm: &mut [u8], volume: u8) {
+    let volume = volume.min(100);
+    if volume >= 100 {
+        return;
+    }
+    let volume = i32::from(volume);
+    for sample in pcm.chunks_exact_mut(2) {
+        let value = i32::from(i16::from_le_bytes([sample[0], sample[1]]));
+        let scaled = (value * volume / 100) as i16;
+        let bytes = scaled.to_le_bytes();
+        sample[0] = bytes[0];
+        sample[1] = bytes[1];
     }
 }
 
@@ -760,6 +917,7 @@ fn run_gui(
     spares: Arc<Mutex<Vec<Vec<u8>>>>,
     frame_seq: Arc<AtomicU64>,
     port: u16,
+    local_ipv4: Option<Ipv4Addr>,
 ) {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -771,7 +929,7 @@ fn run_gui(
     if let Err(error) = eframe::run_native(
         "ViewGo",
         options,
-        Box::new(move |cc| ViewGoApp::init(cc, shared, latest, spares, frame_seq, port)),
+        Box::new(move |cc| ViewGoApp::init(cc, shared, latest, spares, frame_seq, port, local_ipv4)),
     ) {
         log(format!("Cannot open window: {error}"));
     }
@@ -884,6 +1042,8 @@ struct ViewGoApp {
     spares: Arc<Mutex<Vec<Vec<u8>>>>,
     frame_seq: Arc<AtomicU64>,
     port: u16,
+    /// IPv4 address shown to the user for manual entry on the phone.
+    local_ipv4: Option<Ipv4Addr>,
     seen: u64,
     last: Option<(Vec<u8>, usize, usize)>,
     scaled: Vec<u32>,
@@ -896,6 +1056,8 @@ struct ViewGoApp {
     borderless: bool,
     /// Counts frames until the mirror window is recreated after a toggle.
     recreate_in: u32,
+    /// Throttles the "render is slow" log so a struggling laptop reports once per couple seconds.
+    last_slow_render: Instant,
 }
 
 impl ViewGoApp {
@@ -906,6 +1068,7 @@ impl ViewGoApp {
         spares: Arc<Mutex<Vec<Vec<u8>>>>,
         frame_seq: Arc<AtomicU64>,
         port: u16,
+        local_ipv4: Option<Ipv4Addr>,
     ) -> Result<Box<dyn eframe::App>, Box<dyn std::error::Error + Send + Sync>> {
         let mut visuals = egui::Visuals::light();
         visuals.panel_fill = BG;
@@ -927,12 +1090,23 @@ impl ViewGoApp {
         visuals.widgets.active.corner_radius = egui::CornerRadius::same(8);
         cc.egui_ctx.set_visuals(visuals);
 
+        // A laptop whose driver fell back to a software adapter paints the mirror slowly no matter
+        // how fast the decode is; naming the adapter makes that visible instead of mysterious.
+        if let Some(state) = &cc.wgpu_render_state {
+            let info = state.adapter.get_info();
+            log(format!(
+                "Graphics: {} ({:?} via {:?})",
+                info.name, info.device_type, info.backend
+            ));
+        }
+
         Ok(Box::new(ViewGoApp {
             shared,
             latest,
             spares,
             frame_seq,
             port,
+            local_ipv4,
             seen: 0,
             last: None,
             scaled: Vec::new(),
@@ -942,6 +1116,7 @@ impl ViewGoApp {
             stream_size: None,
             borderless: false,
             recreate_in: 0,
+            last_slow_render: Instant::now(),
         }))
     }
 
@@ -988,6 +1163,7 @@ impl ViewGoApp {
             }
         }
         if (fresh || self.area != area) && self.last.is_some() {
+            let started = Instant::now();
             let (frame, fw, fh) = self.last.as_ref().unwrap();
             let (dw, dh) = fit_size(*fw, *fh, area.0, area.1);
             if dw > 0 && dh > 0 {
@@ -996,6 +1172,7 @@ impl ViewGoApp {
                 }
                 self.scaled.fill(0);
                 scale_fit_bgra(frame, *fw, *fh, &mut self.scaled, dw, dh);
+                let after_scale = started.elapsed();
                 let pixels: Vec<egui::Color32> = self
                     .scaled
                     .iter()
@@ -1007,6 +1184,7 @@ impl ViewGoApp {
                         )
                     })
                     .collect();
+                let after_convert = started.elapsed();
                 let image = egui::ColorImage {
                     size: [dw, dh],
                     source_size: egui::vec2(dw as f32, dh as f32),
@@ -1021,6 +1199,22 @@ impl ViewGoApp {
                 }
                 self.tex_size = (dw, dh);
                 self.area = area;
+                self.shared.drawn.fetch_add(1, Ordering::Relaxed);
+                // A render that takes longer than a frame budget shows up as stutter on screen.
+                // Report it (throttled) instead of silently dropping frames.
+                let elapsed = started.elapsed();
+                if elapsed > Duration::from_millis(33)
+                    && self.last_slow_render.elapsed() > Duration::from_secs(2)
+                {
+                    self.last_slow_render = Instant::now();
+                    log(format!(
+                        "Render is slow ({} ms for {dw}x{dh} from {fw}x{fh}: scale {} ms, convert {} ms, upload {} ms); lower the mirror window size if video stutters",
+                        elapsed.as_millis(),
+                        after_scale.as_millis(),
+                        (after_convert - after_scale).as_millis(),
+                        (elapsed - after_convert).as_millis(),
+                    ));
+                }
             }
         }
     }
@@ -1030,13 +1224,15 @@ impl eframe::App for ViewGoApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Owned clone so the panel closures can use it while `ui` is borrowed.
         let ctx = ui.ctx().clone();
-        // Keep status, code and log live even when no video frames arrive.
-        ctx.request_repaint_after(Duration::from_millis(16));
-
         let status = self.shared.status.lock().unwrap().clone();
         let code = self.shared.current_code();
         let active = *self.shared.active.lock().unwrap();
+        // Keep status, code and log live even when no video frames arrive. While mirroring, ask a
+        // little more often than the display refresh: a 16 ms timer drifts against a 16.7 ms vsync
+        // and occasionally misses one, which shows up as 60 fps jittering to 30.
+        ctx.request_repaint_after(Duration::from_millis(if active { 8 } else { 16 }));
         let port = self.port;
+        let local_ipv4 = self.local_ipv4;
 
         egui::Panel::top("header").exact_size(60.0).show(ui, |ui| {
             ui.horizontal_centered(|ui| {
@@ -1109,6 +1305,32 @@ impl eframe::App for ViewGoApp {
                         .size(12.0)
                         .color(MUTED),
                 );
+                ui.add_space(10.0);
+                match local_ipv4 {
+                    Some(ip) => {
+                        ui.label(egui::RichText::new("Laptop address").size(12.0).color(MUTED));
+                        ui.label(
+                            egui::RichText::new(format!("{ip}:{port}"))
+                                .monospace()
+                                .size(14.0)
+                                .color(INK),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "Type this in the phone's Laptop IP field if search fails.",
+                            )
+                            .size(11.0)
+                            .color(MUTED),
+                        );
+                    }
+                    None => {
+                        ui.label(
+                            egui::RichText::new("No IPv4 address detected")
+                                .size(12.0)
+                                .color(DANGER),
+                        );
+                    }
+                }
             });
             ui.add_space(14.0);
             card(ui, |ui| {
@@ -1135,6 +1357,24 @@ impl eframe::App for ViewGoApp {
             });
             ui.add_space(14.0);
             card(ui, |ui| {
+                ui.label(egui::RichText::new("Audio").size(13.0).color(MUTED));
+                ui.add_space(6.0);
+                let mut volume = self.shared.volume.load(Ordering::Relaxed);
+                if ui
+                    .add(egui::Slider::new(&mut volume, 0..=100).suffix("%"))
+                    .changed()
+                {
+                    self.shared.volume.store(volume, Ordering::Relaxed);
+                }
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("Phone sound; changes apply while mirroring.")
+                        .size(11.0)
+                        .color(MUTED),
+                );
+            });
+            ui.add_space(14.0);
+            card(ui, |ui| {
                 ui.label(
                     egui::RichText::new("How to connect")
                         .size(13.0)
@@ -1147,7 +1387,7 @@ impl eframe::App for ViewGoApp {
                         .color(INK),
                 );
                 ui.label(
-                    egui::RichText::new("2.  Tap the search icon to find the laptop.")
+                    egui::RichText::new("2.  Tap the search icon, or type the laptop address above.")
                         .size(14.0)
                         .color(INK),
                 );
@@ -1414,7 +1654,48 @@ fn paint_flow(painter: &egui::Painter, rect: egui::Rect) {
     }
 }
 
-fn publish_receiver(port: u16) -> Option<ServiceDaemon> {
+/// IPv4 addresses of the local interfaces, excluding loopback.
+///
+/// The receiver listens on `0.0.0.0` (IPv4 only). `enable_addr_auto()` would also advertise AAAA
+/// records, and Android can then resolve the laptop over IPv6 and fail to connect. Enumerating the
+/// same interfaces ourselves keeps the existing multi-NIC behaviour while publishing A records only.
+fn local_ipv4_addresses() -> Vec<Ipv4Addr> {
+    let mut addresses: Vec<Ipv4Addr> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|interface| !interface.is_loopback())
+        .filter_map(|interface| match interface.addr {
+            if_addrs::IfAddr::V4(v4)
+                if !v4.ip.is_unspecified() && !v4.ip.is_link_local() =>
+            {
+                Some(v4.ip)
+            }
+            _ => None,
+        })
+        .collect();
+    addresses.sort();
+    addresses.dedup();
+    addresses
+}
+
+/// The address Windows would use for outgoing traffic, shown in the window so it can be typed on
+/// the phone. A UDP `connect` sends nothing; it only asks the routing table for a source address.
+fn primary_ipv4(addresses: &[Ipv4Addr]) -> Option<Ipv4Addr> {
+    let routed = UdpSocket::bind(("0.0.0.0", 0))
+        .and_then(|socket| {
+            // TEST-NET-1 (RFC 5737) keeps the dummy peer off the real internet; nothing is sent.
+            socket.connect(("192.0.2.1", 9))?;
+            socket.local_addr()
+        })
+        .ok()
+        .and_then(|addr| match addr.ip() {
+            IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+            _ => None,
+        });
+    routed.or_else(|| addresses.first().copied())
+}
+
+fn publish_receiver(port: u16, addresses: &[Ipv4Addr]) -> Option<ServiceDaemon> {
     let daemon = match ServiceDaemon::new() {
         Ok(daemon) => daemon,
         Err(error) => {
@@ -1422,15 +1703,30 @@ fn publish_receiver(port: u16) -> Option<ServiceDaemon> {
             return None;
         }
     };
-    let info = match ServiceInfo::new(
-        "_viewgo._tcp.local.",
-        "ViewGo",
-        "viewgo.local.",
-        "0.0.0.0",
-        port,
-        &[("version", "1")][..],
-    ) {
-        Ok(info) => info.enable_addr_auto(),
+    let info = if addresses.is_empty() {
+        // Unusual (no IPv4 interface): keep auto-detection rather than publishing nothing.
+        ServiceInfo::new(
+            "_viewgo._tcp.local.",
+            "ViewGo",
+            "viewgo.local.",
+            "0.0.0.0",
+            port,
+            &[("version", "1")][..],
+        )
+        .map(ServiceInfo::enable_addr_auto)
+    } else {
+        let ips: Vec<IpAddr> = addresses.iter().copied().map(IpAddr::V4).collect();
+        ServiceInfo::new(
+            "_viewgo._tcp.local.",
+            "ViewGo",
+            "viewgo.local.",
+            &ips[..],
+            port,
+            &[("version", "1")][..],
+        )
+    };
+    let info = match info {
+        Ok(info) => info,
         Err(error) => {
             log(format!("Local discovery unavailable: {error}"));
             let _ = daemon.shutdown();
@@ -1443,6 +1739,23 @@ fn publish_receiver(port: u16) -> Option<ServiceDaemon> {
         return None;
     }
     Some(daemon)
+}
+
+/// Longest side of the raw BGRA frame the decoder emits. The mirror window is 720 px tall by
+/// default, so anything above 1080 is wasted pipe traffic; a maximized window upscales slightly
+/// instead of stalling the stream.
+const DECODE_MAX: usize = 1080;
+
+/// Size ffmpeg should scale decoded frames to. Streams already within the cap keep their exact
+/// size (no needless resample); larger ones are fitted, preserving aspect.
+fn decode_size(src_w: usize, src_h: usize) -> (usize, usize) {
+    if src_w == 0 || src_h == 0 {
+        return (0, 0);
+    }
+    if src_w.max(src_h) <= DECODE_MAX {
+        return (src_w, src_h);
+    }
+    fit_size(src_w, src_h, DECODE_MAX, DECODE_MAX)
 }
 
 fn fit_size(src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> (usize, usize) {
@@ -1472,7 +1785,7 @@ fn scale_fit_bgra(
     if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
         return;
     }
-    if frame.len() < src_w * src_h * 4 {
+    if frame.len() < src_w * src_h * 4 || out.len() < dst_w * dst_h {
         return;
     }
     let (draw_w, draw_h) = fit_size(src_w, src_h, dst_w, dst_h);
@@ -1482,11 +1795,57 @@ fn scale_fit_bgra(
     // covered source pixels instead. Upscaling uses bilinear so enlarged windows stay smooth.
     let upscale = draw_w > src_w || draw_h > src_h;
 
-    for y in 0..draw_h {
+    // Scaling a 1080x2400 phone frame down to a ~324x720 window is the receiver's heaviest
+    // per-frame CPU job. Split the destination rows across cores so it does not stall the UI.
+    let workers = thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .clamp(1, 8)
+        .min(draw_h);
+    let rows_per_band = draw_h.div_ceil(workers);
+    let region_start = top * dst_w;
+    let region = &mut out[region_start..region_start + draw_h * dst_w];
+
+    if workers == 1 {
+        scale_band(
+            frame, src_w, src_h, region, dst_w, 0, draw_h, draw_w, draw_h, left, upscale,
+        );
+        return;
+    }
+    std::thread::scope(|scope| {
+        for (band_index, band) in region.chunks_mut(rows_per_band * dst_w).enumerate() {
+            let y_start = band_index * rows_per_band;
+            let rows = band.len() / dst_w;
+            scope.spawn(move || {
+                scale_band(
+                    frame, src_w, src_h, band, dst_w, y_start, rows, draw_w, draw_h, left, upscale,
+                );
+            });
+        }
+    });
+}
+
+/// Scales destination rows `y_start..y_start + rows` of the fitted picture into `out`.
+#[allow(clippy::too_many_arguments)]
+fn scale_band(
+    frame: &[u8],
+    src_w: usize,
+    src_h: usize,
+    out: &mut [u32],
+    dst_w: usize,
+    y_start: usize,
+    rows: usize,
+    draw_w: usize,
+    draw_h: usize,
+    left: usize,
+    upscale: bool,
+) {
+    for y in 0..rows {
+        let sy = y_start + y;
         for x in 0..draw_w {
             let (b, g, r) = if upscale {
                 let fx = (x as f64 + 0.5) * src_w as f64 / draw_w as f64 - 0.5;
-                let fy = (y as f64 + 0.5) * src_h as f64 / draw_h as f64 - 0.5;
+                let fy = (sy as f64 + 0.5) * src_h as f64 / draw_h as f64 - 0.5;
                 let x0f = fx.max(0.0);
                 let y0f = fy.max(0.0);
                 let x0 = (x0f as usize).min(src_w - 1);
@@ -1514,8 +1873,8 @@ fn scale_fit_bgra(
                 let x1 = (((x + 1) * src_w + draw_w - 1) / draw_w)
                     .min(src_w)
                     .max(x0 + 1);
-                let y0 = y * src_h / draw_h;
-                let y1 = (((y + 1) * src_h + draw_h - 1) / draw_h)
+                let y0 = sy * src_h / draw_h;
+                let y1 = (((sy + 1) * src_h + draw_h - 1) / draw_h)
                     .min(src_h)
                     .max(y0 + 1);
                 let mut sum = [0u64; 3];
@@ -1536,7 +1895,7 @@ fn scale_fit_bgra(
                     (sum[2] / count) as u32,
                 )
             };
-            out[(top + y) * dst_w + left + x] = (r << 16) | (g << 8) | b;
+            out[y * dst_w + left + x] = (r << 16) | (g << 8) | b;
         }
     }
 }
@@ -1560,6 +1919,8 @@ mod tests {
             status: Mutex::new(String::new()),
             started: Mutex::new(None),
             client: Mutex::new(None),
+            volume: AtomicU8::new(DEFAULT_VOLUME),
+            drawn: AtomicU64::new(0),
         })
     }
 
@@ -1595,13 +1956,30 @@ mod tests {
     }
 
     #[test]
-    fn config_dimensions_change_after_rotation() {
-        let mut builder = FfmpegBuilder::default();
-        assert_eq!(builder.dimensions, None);
-        builder.dimensions = Some((1920, 1080));
-        assert_eq!(builder.dimensions, Some((1920, 1080)));
-        builder.dimensions = Some((1080, 1920));
-        assert_eq!(builder.dimensions, Some((1080, 1920)));
+    fn decoder_args_pin_the_output_size_and_offer_hardware_decode() {
+        let (w, h) = decode_size(1080, 2400);
+        let hardware = decoder_args(true, w, h);
+        let software = decoder_args(false, w, h);
+        assert!(hardware.windows(2).any(|pair| pair == ["-hwaccel", "auto"]));
+        assert!(!software.iter().any(|arg| arg == "-hwaccel"));
+        // The reader thread assumes exactly this frame size, so the filter must not drift.
+        assert!(hardware.iter().any(|arg| arg == "scale=486:1080"));
+        assert!(hardware.iter().any(|arg| arg == "bgra"));
+        assert!(hardware.iter().any(|arg| arg == "passthrough"));
+    }
+
+    #[test]
+    fn a_failed_hardware_decoder_falls_back_to_software_once() {
+        let mut builder = FfmpegBuilder::new(
+            Arc::new(Mutex::new(Latest::new())),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(AtomicU64::new(0)),
+        );
+        builder.hwaccel = true;
+        builder.stream = Some((1080, 2400));
+        assert_eq!(builder.software_retry(), Some((1080, 2400)));
+        assert!(!builder.hwaccel);
+        assert_eq!(builder.software_retry(), None, "software is never retried");
     }
 
     #[test]
@@ -1642,6 +2020,23 @@ mod tests {
         assert_eq!(fit_size(1080, 1920, 540, 360), (203, 360));
         assert_eq!(fit_size(1920, 1080, 540, 360), (540, 304));
         assert_eq!(fit_size(0, 1920, 540, 360), (0, 0));
+    }
+
+    #[test]
+    fn decode_size_caps_the_long_side_without_upscaling_small_streams() {
+        // 1080x2400 phone frame: 10 MB of raw BGRA per frame is what made video stutter.
+        assert_eq!(decode_size(1080, 2400), (486, 1080));
+        // Landscape phone or a small screen keeps its size exactly.
+        assert_eq!(decode_size(1920, 1080), (1080, 608));
+        assert_eq!(decode_size(640, 360), (640, 360));
+        assert_eq!(decode_size(0, 0), (0, 0));
+        // Output dimensions are always even enough for the reader's frame size math and never
+        // exceed the cap.
+        for (w, h) in [(1080, 2400), (2400, 1080), (1440, 3200), (720, 1280)] {
+            let (dw, dh) = decode_size(w, h);
+            assert!(dw.max(dh) <= DECODE_MAX, "{dw}x{dh} exceeds cap");
+            assert!(dw > 0 && dh > 0);
+        }
     }
 
     #[test]
@@ -1693,5 +2088,26 @@ mod tests {
             STATUS_RATE_LIMITED
         );
         assert_eq!(pairing_status(&shared, peer(3), &[1; 16]), STATUS_OK);
+    }
+
+    #[test]
+    fn gain_scales_pcm_and_mutes_at_zero() {
+        let mut pcm = Vec::new();
+        for value in [1000i16, -1000, i16::MAX, i16::MIN] {
+            pcm.extend_from_slice(&value.to_le_bytes());
+        }
+        apply_gain(&mut pcm, 50);
+        let scaled: Vec<i16> = pcm
+            .chunks_exact(2)
+            .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
+            .collect();
+        assert_eq!(scaled, vec![500, -500, 16383, -16384]);
+
+        apply_gain(&mut pcm, 0);
+        assert!(pcm.iter().all(|&byte| byte == 0));
+
+        let mut untouched = 1234i16.to_le_bytes().to_vec();
+        apply_gain(&mut untouched, 100);
+        assert_eq!(i16::from_le_bytes([untouched[0], untouched[1]]), 1234);
     }
 }
