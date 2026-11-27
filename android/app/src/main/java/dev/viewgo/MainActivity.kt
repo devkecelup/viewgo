@@ -4,17 +4,21 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.os.Bundle
+import android.text.Editable
 import android.text.InputFilter
 import android.text.InputType
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -66,19 +70,29 @@ class MainActivity : Activity() {
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
-    private fun card(vertical: Boolean = true): LinearLayout = LinearLayout(this).apply {
-        orientation = if (vertical) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
-        background = GradientDrawable().apply {
-            cornerRadius = dp(14).toFloat()
-            setColor(Color.parseColor(C_BG))
-            setStroke(dp(1), Color.parseColor(C_BORDER))
+    private fun shape(radiusDp: Int, fillColor: String, strokeColor: String? = null, strokeWidthDp: Int = 0): GradientDrawable =
+        GradientDrawable().apply {
+            cornerRadius = dp(radiusDp).toFloat()
+            setColor(Color.parseColor(fillColor))
+            if (strokeColor != null) setStroke(dp(strokeWidthDp), Color.parseColor(strokeColor))
         }
+
+    private fun ripple(content: GradientDrawable, rippleColor: Int): RippleDrawable {
+        val mask = GradientDrawable().apply {
+            cornerRadius = content.cornerRadius
+            setColor(Color.WHITE)
+        }
+        return RippleDrawable(ColorStateList.valueOf(rippleColor), content, mask)
+    }
+
+    private fun card(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        background = shape(16, C_BG, C_BORDER, 1)
         elevation = dp(2).toFloat()
         setPadding(dp(18), dp(16), dp(18), dp(16))
     }
 
-    /** Section head: the section glyph plus its title (no step numbers: the flow reads from
-     * position and status instead). */
+    /** Section head: the section glyph plus its title. */
     private fun sectionHead(iconRes: Int, title: String): LinearLayout =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -88,12 +102,12 @@ class MainActivity : Activity() {
                     setImageResource(iconRes)
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 },
-                LinearLayout.LayoutParams(dp(20), dp(20)),
+                LinearLayout.LayoutParams(dp(22), dp(22)),
             )
             addView(
                 TextView(this@MainActivity).apply {
                     text = title
-                    textSize = 16f
+                    textSize = 17f
                     setTextColor(Color.parseColor(C_INK))
                     typeface = Typeface.DEFAULT_BOLD
                 },
@@ -127,16 +141,16 @@ class MainActivity : Activity() {
             )
         }
 
-    /** Equal-width selectable chips; the selected one fills green. */
+    /** Equal-width selectable chips; the selected one fills green, the others use a green outline. */
     private fun chipGroup(labels: List<String>, selected: Int, onSelect: (Int) -> Unit): LinearLayout {
         val chips = mutableListOf<TextView>()
         fun paint(index: Int) {
             chips.forEachIndexed { i, chip ->
-                chip.background = GradientDrawable().apply {
-                    cornerRadius = dp(10).toFloat()
-                    setColor(Color.parseColor(if (i == index) C_ACCENT else C_SURFACE))
-                }
-                chip.setTextColor(Color.parseColor(if (i == index) "#FFFFFF" else C_INK))
+                val isSelected = i == index
+                val bg = shape(12, if (isSelected) C_ACCENT else C_BG, C_ACCENT, if (isSelected) 0 else 1)
+                val rippleColor = if (isSelected) Color.parseColor("#40FFFFFF") else Color.parseColor("#1A0F7B4F")
+                chip.background = ripple(bg, rippleColor)
+                chip.setTextColor(Color.parseColor(if (isSelected) "#FFFFFF" else C_ACCENT))
             }
         }
         val group = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -146,6 +160,8 @@ class MainActivity : Activity() {
                 textSize = 14f
                 gravity = Gravity.CENTER
                 typeface = Typeface.DEFAULT_BOLD
+                isAllCaps = false
+                setPadding(0, dp(12), 0, dp(12))
                 setOnClickListener {
                     paint(i)
                     onSelect(i)
@@ -154,7 +170,7 @@ class MainActivity : Activity() {
             chips.add(chip)
             group.addView(
                 chip,
-                LinearLayout.LayoutParams(0, dp(44), 1f).apply {
+                LinearLayout.LayoutParams(0, dp(48), 1f).apply {
                     if (i > 0) marginStart = dp(8)
                 },
             )
@@ -163,7 +179,7 @@ class MainActivity : Activity() {
         return group
     }
 
-    /** Icon + label with a platform Switch on the right. */
+    /** Icon + label with a tinted platform Switch on the right. */
     private fun switchRow(
         iconRes: Int,
         label: String,
@@ -190,10 +206,21 @@ class MainActivity : Activity() {
                     marginStart = dp(10)
                 },
             )
+            val accent = Color.parseColor(C_ACCENT)
+            val trackStates = ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(Color.parseColor("#B2D8C8"), Color.parseColor(C_BORDER)),
+            )
+            val thumbStates = ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(accent, Color.parseColor(C_SURFACE)),
+            )
             addView(
                 Switch(this@MainActivity).apply {
                     isChecked = checked
                     contentDescription = label
+                    trackTintList = trackStates
+                    thumbTintList = thumbStates
                     setOnCheckedChangeListener { _, value -> onChange(value) }
                 },
                 LinearLayout.LayoutParams(
@@ -207,23 +234,29 @@ class MainActivity : Activity() {
         button.gravity = Gravity.CENTER
         button.setCompoundDrawablesWithIntrinsicBounds(iconRes, 0, 0, 0)
         button.compoundDrawablePadding = dp(8)
-        button.background = GradientDrawable().apply {
-            cornerRadius = dp(12).toFloat()
-            if (filled) {
-                setColor(Color.parseColor(fill))
-                setStroke(0, Color.TRANSPARENT)
-            } else {
-                setColor(Color.parseColor(C_BG))
-                setStroke(dp(1), Color.parseColor(C_ACCENT))
-            }
-        }
-        button.setTextColor(
-            if (filled) Color.WHITE else Color.parseColor(C_ACCENT),
-        )
+        val bg = shape(14, if (filled) fill else C_BG, if (filled) fill else C_ACCENT, if (filled) 0 else 1)
+        val rippleColor = if (filled) Color.parseColor("#40FFFFFF") else Color.parseColor("#1A0F7B4F")
+        button.background = ripple(bg, rippleColor)
+        button.setTextColor(if (filled) Color.WHITE else Color.parseColor(C_ACCENT))
         button.typeface = Typeface.DEFAULT_BOLD
         button.textSize = 16f
-        button.setPadding(dp(16), dp(13), dp(16), dp(13))
-        button.elevation = if (filled) dp(2).toFloat() else 0f
+        button.isAllCaps = false
+        button.setPadding(dp(20), dp(14), dp(20), dp(14))
+        button.elevation = if (filled) dp(3).toFloat() else 0f
+    }
+
+    private fun codeBg(focused: Boolean): RippleDrawable {
+        val bg = shape(14, C_SURFACE, if (focused) C_ACCENT else C_BORDER, if (focused) 2 else 1)
+        return ripple(bg, Color.parseColor("#1A0F7B4F"))
+    }
+
+    private fun searchButton(): TextView = TextView(this).apply {
+        setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_search, 0, 0, 0)
+        gravity = Gravity.CENTER
+        background = ripple(shape(12, C_ACCENT), Color.parseColor("#40FFFFFF"))
+        contentDescription = "Find laptop"
+        setPadding(dp(12), dp(12), dp(12), dp(12))
+        setOnClickListener { discoverReceiver() }
     }
 
     private fun setStatus(text: String, error: Boolean = false) {
@@ -265,10 +298,10 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val root = LinearLayout(this).apply {
+        val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor(C_BG))
-            setPadding(dp(20), dp(18), dp(20), dp(24))
+            setPadding(dp(20), 0, dp(20), dp(8))
         }
 
         // Header: brand mark on a soft squircle, title and one-line promise.
@@ -278,10 +311,7 @@ class MainActivity : Activity() {
             addView(
                 ImageView(this@MainActivity).apply {
                     setImageResource(R.drawable.ic_logo)
-                    background = GradientDrawable().apply {
-                        cornerRadius = dp(14).toFloat()
-                        setColor(Color.parseColor(C_SURFACE))
-                    }
+                    background = shape(14, C_SURFACE)
                     setPadding(dp(10), dp(10), dp(10), dp(10))
                     scaleType = ImageView.ScaleType.FIT_CENTER
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
@@ -312,14 +342,12 @@ class MainActivity : Activity() {
                 },
             )
         }
-        root.addView(header, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        val gap = View(this)
-        root.addView(gap, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(18)))
+        content.addView(header, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        content.addView(View(this), ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(18)))
 
-        // Connection: laptop row and code row in one compact card. No step numbers — the flow
-        // reads from position and status, which is what keeps it to a single screen.
+        // Connection card: find the laptop, then enter the code.
         val connectionCard = card().apply {
-            addView(sectionHead(R.drawable.ic_laptop, "Connection"))
+            addView(sectionHead(R.drawable.ic_laptop, "Connect to laptop"))
 
             val laptopRow = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -329,12 +357,12 @@ class MainActivity : Activity() {
                         setImageResource(R.drawable.ic_laptop)
                         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                     },
-                    LinearLayout.LayoutParams(dp(20), dp(20)),
+                    LinearLayout.LayoutParams(dp(22), dp(22)),
                 )
                 laptopStatus = TextView(this@MainActivity).apply {
-                    text = "Not found yet"
+                    text = "Tap the search button to find your laptop."
                     textSize = 15f
-                    setTextColor(Color.parseColor(C_INK))
+                    setTextColor(Color.parseColor(C_MUTED))
                     maxLines = 2
                     ellipsize = android.text.TextUtils.TruncateAt.END
                 }
@@ -344,21 +372,9 @@ class MainActivity : Activity() {
                         marginStart = dp(10)
                     },
                 )
-                // The old full-width Find button became a 44dp icon button on the row.
-                val find = TextView(this@MainActivity).apply {
-                    setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_search, 0, 0, 0)
-                    gravity = Gravity.CENTER
-                    background = GradientDrawable().apply {
-                        cornerRadius = dp(10).toFloat()
-                        setColor(Color.parseColor(C_SURFACE))
-                        setStroke(dp(1), Color.parseColor(C_BORDER))
-                    }
-                    contentDescription = "Find laptop"
-                    setOnClickListener { discoverReceiver() }
-                }
                 addView(
-                    find,
-                    LinearLayout.LayoutParams(dp(44), dp(44)).apply { marginStart = dp(10) },
+                    searchButton(),
+                    LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginStart = dp(10) },
                 )
             }
             addView(
@@ -366,30 +382,40 @@ class MainActivity : Activity() {
                 LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = dp(10) },
+                ).apply { topMargin = dp(12) },
             )
 
-            // The pairing code is one tile with a placeholder, not a labelled form field: the
-            // explanation lives below in a plain sentence.
+            addView(optionLabel(R.drawable.ic_key, "Pairing code"), cardGap().apply { topMargin = dp(18) })
             codeField = EditText(this@MainActivity).apply {
-                hint = "e.g. H5T2"
+                hint = "AB3D"
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
                 filters = arrayOf(InputFilter.LengthFilter(4))
                 setSingleLine()
                 typeface = Typeface.MONOSPACE
-                letterSpacing = 0.3f
+                letterSpacing = 0.28f
                 gravity = Gravity.CENTER
-                textSize = 24f
+                textSize = 26f
                 setTextColor(Color.parseColor(C_INK))
                 setHintTextColor(Color.parseColor(C_MUTED))
-                background = GradientDrawable().apply {
-                    cornerRadius = dp(14).toFloat()
-                    setColor(Color.parseColor(C_SURFACE))
-                    setStroke(dp(1), Color.parseColor(C_BORDER))
+                background = codeBg(false)
+                onFocusChangeListener = View.OnFocusChangeListener { _, hasFocus ->
+                    background = codeBg(hasFocus)
                 }
-                setPadding(dp(14), dp(14), dp(14), dp(14))
+                addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                    override fun afterTextChanged(s: Editable?) {
+                        s?.let {
+                            val upper = it.toString().uppercase()
+                            if (upper != it.toString()) {
+                                it.replace(0, it.length, upper)
+                            }
+                        }
+                    }
+                })
+                setPadding(dp(16), dp(16), dp(16), dp(16))
             }
-            addView(codeField, cardGap().apply { topMargin = dp(14) })
+            addView(codeField, cardGap().apply { topMargin = dp(8) })
             addView(
                 TextView(this@MainActivity).apply {
                     text = "Type the 4-character code shown on your laptop."
@@ -400,10 +426,10 @@ class MainActivity : Activity() {
                 },
             )
         }
-        addCard(root, connectionCard)
+        addCard(content, connectionCard)
 
-        // Flow picture: where the picture goes, with the live status right under it.
-        root.addView(
+        // Flow picture and live status.
+        content.addView(
             ImageView(this).apply {
                 setImageResource(R.drawable.ic_flow)
                 scaleType = ImageView.ScaleType.FIT_CENTER
@@ -411,12 +437,12 @@ class MainActivity : Activity() {
             },
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(150),
+                dp(120),
             ).apply { topMargin = dp(6) },
         )
-        root.addView(
+        content.addView(
             TextView(this).apply {
-                text = "On the same Wi-Fi network first."
+                text = "Both devices must be on the same Wi-Fi network."
                 textSize = 13f
                 setTextColor(Color.parseColor(C_MUTED))
                 gravity = Gravity.CENTER
@@ -447,13 +473,10 @@ class MainActivity : Activity() {
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
             )
         }
-        root.addView(statusRow, cardGap())
-        root.addView(
-            View(this),
-            cardGap().apply { height = dp(14) },
-        )
+        content.addView(statusRow, cardGap())
+        content.addView(View(this), cardGap().apply { height = dp(12) })
 
-        // Step 3: options — chips instead of dropdowns, a switch for audio.
+        // Options card: quality, share target, audio.
         val optionsCard = card().apply {
             addView(sectionHead(R.drawable.ic_settings, "Options"))
 
@@ -490,9 +513,9 @@ class MainActivity : Activity() {
                 },
             )
         }
-        addCard(root, optionsCard)
+        addCard(content, optionsCard)
 
-        // One primary action that changes with state: Start -> Stop.
+        // One primary action pinned to the bottom: Start -> Stop.
         primaryButton = Button(this).apply {
             text = "Start mirroring"
             setOnClickListener {
@@ -508,15 +531,23 @@ class MainActivity : Activity() {
             }
         }
         paintButton(primaryButton, true, R.drawable.ic_play)
-        root.addView(primaryButton, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
 
-        // Status lives under the flow picture above, so the bottom of the screen stays a single
-        // primary action.
-
-        val scroll = ScrollView(this).apply { addView(root) }
+        val scroll = ScrollView(this).apply { addView(content) }
+        val outer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor(C_BG))
+            addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(
+                primaryButton,
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply {
+                    setMargins(dp(20), dp(12), dp(20), 0)
+                },
+            )
+        }
+        setContentView(outer)
         // Content must clear the status bar: with targetSdk 35 Android 15 draws edge-to-edge, so
         // without this the header sits under the battery/clock and Stop can hide behind the nav bar.
-        scroll.setOnApplyWindowInsetsListener { view, insets ->
+        outer.setOnApplyWindowInsetsListener { view, insets ->
             val top = if (Build.VERSION.SDK_INT >= 30) {
                 insets.getInsets(android.view.WindowInsets.Type.systemBars()).top
             } else {
@@ -529,11 +560,10 @@ class MainActivity : Activity() {
                 @Suppress("DEPRECATION")
                 insets.systemWindowInsetBottom
             }
-            view.setPadding(dp(20), dp(18) + top, dp(20), dp(24) + bottom)
+            view.setPadding(0, dp(18) + top, 0, dp(16) + bottom)
             insets
         }
-        setContentView(scroll)
-        scroll.requestApplyInsets()
+        outer.requestApplyInsets()
 
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED

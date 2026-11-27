@@ -1,6 +1,6 @@
 [package]
 name = "viewgo-receiver"
-version = "0.3.10"
+version = "0.3.11"
 edition = "2021"
 description = "Windows receiver for ViewGo Android screen mirroring"
 license = "MIT"

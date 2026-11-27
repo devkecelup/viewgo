@@ -54,7 +54,8 @@ function New-TileBitmap([int]$size, [bool]$face, [bool]$transparent = $false) {
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
     if ($transparent) {
         # Explorer/taskbar icons must not carry a white plate: clear to nothing.
-        $g.Clear([System.Drawing.Color]::FromArgb(0, 255, 255, 255))
+        # Use transparent black so Windows contexts that ignore alpha do not show a white fringe.
+        $g.Clear([System.Drawing.Color]::FromArgb(0, 0, 0, 0))
     } else {
         $g.Clear($white)
     }
@@ -89,7 +90,7 @@ function Write-Ico([string]$path, $sizes) {
 
 # --- exe icon -------------------------------------------------------------
 New-Item -ItemType Directory -Force -Path "$root\receiver" | Out-Null
-Write-Ico "$root\receiver\icon.ico" @(32, 48, 256)
+Write-Ico "$root\receiver\icon.ico" @(16, 24, 32, 48, 256)
 Write-Host "icon.ico -> $((Get-Item "$root\receiver\icon.ico").Length) bytes"
 
 # --- Inno Setup wizard images ---------------------------------------------
