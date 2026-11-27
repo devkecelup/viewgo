@@ -786,6 +786,7 @@ const INK: egui::Color32 = egui::Color32::from_rgb(0x10, 0x18, 0x28);
 const MUTED: egui::Color32 = egui::Color32::from_rgb(0x5f, 0x67, 0x72);
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x0f, 0x7b, 0x4f);
 const ACCENT_INK: egui::Color32 = egui::Color32::from_rgb(0xff, 0xff, 0xff);
+const DANGER: egui::Color32 = egui::Color32::from_rgb(0xb4, 0x23, 0x18); // same red as the Android Stop
 
 /// Stable id so OBS Window Capture keeps matching the title across repaints.
 fn mirror_viewport() -> egui::ViewportId {
@@ -1119,7 +1120,12 @@ impl eframe::App for ViewGoApp {
                     if ui
                         .add_sized(
                             [ui.available_width(), 36.0],
-                            egui::Button::new(egui::RichText::new("Stop sharing").strong()),
+                            egui::Button::new(
+                                egui::RichText::new("Stop sharing")
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(DANGER),
                         )
                         .clicked()
                     {
@@ -1141,7 +1147,7 @@ impl eframe::App for ViewGoApp {
                         .color(INK),
                 );
                 ui.label(
-                    egui::RichText::new("2.  Tap Find laptop on the same Wi-Fi.")
+                    egui::RichText::new("2.  Tap the search icon to find the laptop.")
                         .size(14.0)
                         .color(INK),
                 );

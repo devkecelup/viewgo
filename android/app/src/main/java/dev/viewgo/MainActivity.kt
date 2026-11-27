@@ -203,14 +203,14 @@ class MainActivity : Activity() {
             )
         }
 
-    private fun paintButton(button: Button, filled: Boolean, iconRes: Int) {
+    private fun paintButton(button: Button, filled: Boolean, iconRes: Int, fill: String = C_ACCENT) {
         button.gravity = Gravity.CENTER
         button.setCompoundDrawablesWithIntrinsicBounds(iconRes, 0, 0, 0)
         button.compoundDrawablePadding = dp(8)
         button.background = GradientDrawable().apply {
             cornerRadius = dp(12).toFloat()
             if (filled) {
-                setColor(Color.parseColor(C_ACCENT))
+                setColor(Color.parseColor(fill))
                 setStroke(0, Color.TRANSPARENT)
             } else {
                 setColor(Color.parseColor(C_BG))
@@ -249,12 +249,17 @@ class MainActivity : Activity() {
     private fun cardGap(): LinearLayout.LayoutParams =
         LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
 
-    /** One primary button that changes with state: green Start with a play glyph, outlined Stop. */
+    /** One primary button that changes with state: green Start with a play glyph, red Stop. */
     private fun setMirroring(on: Boolean) {
         mirroring = on
         if (!::primaryButton.isInitialized) return
         primaryButton.text = if (on) "Stop mirroring" else "Start mirroring"
-        paintButton(primaryButton, !on, if (on) R.drawable.ic_stop else R.drawable.ic_play)
+        paintButton(
+            primaryButton,
+            true,
+            if (on) R.drawable.ic_stop else R.drawable.ic_play,
+            if (on) C_ERROR else C_ACCENT,
+        )
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -320,23 +325,24 @@ class MainActivity : Activity() {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 addView(
-                    TextView(this@MainActivity).apply {
-                        text = "Laptop"
-                        textSize = 14f
-                        setTextColor(Color.parseColor(C_MUTED))
+                    ImageView(this@MainActivity).apply {
+                        setImageResource(R.drawable.ic_laptop)
+                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                     },
-                    LinearLayout.LayoutParams(dp(58), ViewGroup.LayoutParams.WRAP_CONTENT),
+                    LinearLayout.LayoutParams(dp(20), dp(20)),
                 )
                 laptopStatus = TextView(this@MainActivity).apply {
                     text = "Not found yet"
-                    textSize = 14f
+                    textSize = 15f
                     setTextColor(Color.parseColor(C_INK))
                     maxLines = 2
                     ellipsize = android.text.TextUtils.TruncateAt.END
                 }
                 addView(
                     laptopStatus,
-                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                        marginStart = dp(10)
+                    },
                 )
                 // The old full-width Find button became a 44dp icon button on the row.
                 val find = TextView(this@MainActivity).apply {
@@ -363,16 +369,8 @@ class MainActivity : Activity() {
                 ).apply { topMargin = dp(10) },
             )
 
-            // Code row
-            addView(
-                TextView(this@MainActivity).apply {
-                    text = "PAIRING CODE"
-                    textSize = 11f
-                    letterSpacing = 0.12f
-                    setTextColor(Color.parseColor(C_MUTED))
-                },
-                cardGap().apply { topMargin = dp(16) },
-            )
+            // The pairing code is one tile with a placeholder, not a labelled form field: the
+            // explanation lives below in a plain sentence.
             codeField = EditText(this@MainActivity).apply {
                 hint = "e.g. H5T2"
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
@@ -383,17 +381,18 @@ class MainActivity : Activity() {
                 gravity = Gravity.CENTER
                 textSize = 24f
                 setTextColor(Color.parseColor(C_INK))
+                setHintTextColor(Color.parseColor(C_MUTED))
                 background = GradientDrawable().apply {
-                    cornerRadius = dp(12).toFloat()
+                    cornerRadius = dp(14).toFloat()
                     setColor(Color.parseColor(C_SURFACE))
                     setStroke(dp(1), Color.parseColor(C_BORDER))
                 }
-                setPadding(dp(14), dp(12), dp(14), dp(12))
+                setPadding(dp(14), dp(14), dp(14), dp(14))
             }
-            addView(codeField, cardGap().apply { topMargin = dp(6) })
+            addView(codeField, cardGap().apply { topMargin = dp(14) })
             addView(
                 TextView(this@MainActivity).apply {
-                    text = "Four characters, shown on your laptop."
+                    text = "Type the 4-character code shown on your laptop."
                     textSize = 12f
                     setTextColor(Color.parseColor(C_MUTED))
                     gravity = Gravity.CENTER
@@ -445,10 +444,7 @@ class MainActivity : Activity() {
             }
             addView(
                 statusLabel,
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                ),
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
             )
         }
         root.addView(statusRow, cardGap())
@@ -550,7 +546,7 @@ class MainActivity : Activity() {
         val host = selectedHost
         val code = normalizeCode(codeField.text.toString())
         if (host == null) {
-            setStatus("Find your laptop first.", error = true)
+            setStatus("Search for your laptop first.", error = true)
             laptopStatus.setTextColor(Color.parseColor(C_ERROR))
             return
         }

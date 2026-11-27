@@ -48,11 +48,16 @@ function PaintTile([System.Drawing.Graphics]$g, [float]$s, [bool]$withFace) {
     }
 }
 
-function New-TileBitmap([int]$size, [bool]$face) {
+function New-TileBitmap([int]$size, [bool]$face, [bool]$transparent = $false) {
     $bmp = New-Object System.Drawing.Bitmap $size, $size
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-    $g.Clear($white)
+    if ($transparent) {
+        # Explorer/taskbar icons must not carry a white plate: clear to nothing.
+        $g.Clear([System.Drawing.Color]::FromArgb(0, 255, 255, 255))
+    } else {
+        $g.Clear($white)
+    }
     PaintTile $g ([float]$size) $face
     $g.Dispose()
     return $bmp
@@ -64,7 +69,7 @@ function Write-Ico([string]$path, $sizes) {
     $blobs = @()
     foreach ($s in $sizes) {
         $png = New-Object System.IO.MemoryStream
-        (New-TileBitmap $s $false).Save($png, [System.Drawing.Imaging.ImageFormat]::Png)
+        (New-TileBitmap $s $false $true).Save($png, [System.Drawing.Imaging.ImageFormat]::Png)
         $blobs += ,@($s, $png.ToArray())
     }
     $fs = [System.IO.File]::Create($path)
