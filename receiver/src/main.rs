@@ -48,6 +48,22 @@ fn log_lines() -> Vec<String> {
         .collect()
 }
 
+/// Stops the current session from this window: shutting the socket down makes serve() end
+/// cleanly, which resets the status and issues a fresh pairing code. The phone sees the closed
+/// socket and stops capturing.
+fn stop_session(shared: &Shared) {
+    // try_clone duplicates the handle (TcpStream is not Clone) and the guard is dropped before
+    // blocking on the shutdown call.
+    let handle = {
+        let guard = shared.client.lock().unwrap();
+        guard.as_ref().and_then(|stream| stream.try_clone().ok())
+    };
+    if let Some(stream) = handle {
+        log("Stopping the session from this window".to_string());
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+    }
+}
+
 struct Shared {
     code: Mutex<(String, Instant)>,
     active: Mutex<bool>,
@@ -56,6 +72,8 @@ struct Shared {
     status: Mutex<String>,
     /// When the current session started, for the idle/quality readout.
     started: Mutex<Option<Instant>>,
+    /// The live client socket, so the window can stop a session from the laptop.
+    client: Mutex<Option<TcpStream>>,
 }
 
 impl Shared {
@@ -146,6 +164,7 @@ fn main() {
         seen_randoms: Mutex::new(Vec::new()),
         status: Mutex::new("Waiting for a phone".to_string()),
         started: Mutex::new(None),
+        client: Mutex::new(None),
     });
 
     let latest = Arc::new(Mutex::new(Latest::new()));
@@ -220,6 +239,7 @@ fn accept_loop(
             }
             *shared.active.lock().unwrap() = false;
             *shared.started.lock().unwrap() = None;
+            *shared.client.lock().unwrap() = None;
             shared.set_status("Waiting for a phone");
             let code = shared.issue_code();
             log(format!("Pairing code: {code}  (valid 120 seconds)"));
@@ -249,6 +269,8 @@ fn serve(
     let mut out = BufWriter::with_capacity(64 * 1024, stream.try_clone()?);
     write_frame(&mut out, &cipher.seal(&[T_AUTH_OK, b'V', b'G', b'M', b'R']))?;
     out.flush()?;
+    // Expose a handle to the live socket so the window can stop this session.
+    *shared.client.lock().unwrap() = Some(stream.try_clone()?);
 
     let mut builder = FfmpegBuilder::default();
     let mut video_config: Option<(u16, u16)> = None;
@@ -742,7 +764,8 @@ fn run_gui(
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1120.0, 780.0])
-            .with_min_inner_size([760.0, 540.0]),
+            .with_min_inner_size([760.0, 540.0])
+            .with_icon(app_icon()),
         ..Default::default()
     };
     if let Err(error) = eframe::run_native(
@@ -767,6 +790,88 @@ const ACCENT_INK: egui::Color32 = egui::Color32::from_rgb(0xff, 0xff, 0xff);
 /// Stable id so OBS Window Capture keeps matching the title across repaints.
 fn mirror_viewport() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("viewgo-mirror")
+}
+
+/// Coverage ratios of the brand mark, shared with the Android launcher icon and
+/// tools/make_icon.ps1 so every surface draws the same shape.
+fn icon_inside_tile(x: f32, y: f32) -> bool {
+    const PAD: f32 = 0.0625;
+    const R: f32 = 0.175;
+    rounded_rect(x, y, PAD, PAD, 1.0 - PAD, 1.0 - PAD, R)
+}
+
+fn icon_inside_screen(x: f32, y: f32) -> bool {
+    // Matches tools/make_icon.ps1: screen is 0.58 x 0.40 of the tile, centred, top at 0.29.
+    let tile = 0.875;
+    let sw = tile * 0.58;
+    let sh = tile * 0.40;
+    let x0 = 0.0625 + (tile - sw) / 2.0;
+    rounded_rect(x, y, x0, 0.29, x0 + sw, 0.29 + sh, sh * 0.16)
+}
+
+fn icon_inside_stand(x: f32, y: f32) -> bool {
+    let tile = 0.875;
+    let w = tile * 0.34;
+    let x0 = 0.0625 + (tile - w) / 2.0;
+    rounded_rect(x, y, x0, 0.67, x0 + w, 0.70, 0.01)
+}
+
+/// Point-in-rounded-rectangle in unit space.
+fn rounded_rect(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> bool {
+    if x < x0 || x > x1 || y < y0 || y > y1 {
+        return false;
+    }
+    let (ix0, ix1) = (x0 + r, x1 - r);
+    let (iy0, iy1) = (y0 + r, y1 - r);
+    if x >= ix0 && x <= ix1 || y >= iy0 && y <= iy1 {
+        return true;
+    }
+    let cx = if x < ix0 { ix0 } else { ix1 };
+    let cy = if y < iy0 { iy0 } else { iy1 };
+    (x - cx).powi(2) + (y - cy).powi(2) <= r * r
+}
+
+/// 32x32 RGBA brand mark for the window and taskbar icon, drawn here so no asset file is needed.
+fn app_icon() -> egui::IconData {
+    const S: usize = 32;
+    const SS: f32 = 4.0; // 4x4 supersamples per pixel
+    let mut rgba = vec![0u8; S * S * 4];
+    for y in 0..S {
+        for x in 0..S {
+            let mut cov_green = 0u32;
+            let mut cov_white = 0u32;
+            for sy in 0..4 {
+                for sx in 0..4 {
+                    let px = (x as f32 + sx as f32 / SS) / S as f32;
+                    let py = (y as f32 + sy as f32 / SS) / S as f32;
+                    if !icon_inside_tile(px, py) {
+                        continue;
+                    }
+                    if icon_inside_screen(px, py) || icon_inside_stand(px, py) {
+                        cov_white += 1;
+                    } else {
+                        cov_green += 1;
+                    }
+                }
+            }
+            let total = (cov_green + cov_white) as f32 / 16.0;
+            if total <= 0.0 {
+                continue; // stays transparent
+            }
+            let i = (y * S + x) * 4;
+            // Blend white over green by how much of the pixel the glyph covers.
+            let w = cov_white as f32 / (cov_green + cov_white).max(1) as f32;
+            rgba[i] = (15.0 + (255.0 - 15.0) * w).round() as u8;
+            rgba[i + 1] = (123.0 + (255.0 - 123.0) * w).round() as u8;
+            rgba[i + 2] = (79.0 + (255.0 - 79.0) * w).round() as u8;
+            rgba[i + 3] = (total * 255.0).round() as u8;
+        }
+    }
+    egui::IconData {
+        rgba,
+        width: S as u32,
+        height: S as u32,
+    }
 }
 
 /// Target height for the mirror window; width follows the stream aspect so the picture fills it.
@@ -1009,6 +1114,18 @@ impl eframe::App for ViewGoApp {
                 ui.label(egui::RichText::new("Session").size(13.0).color(MUTED));
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new(status).size(15.0).color(INK));
+                if active {
+                    ui.add_space(10.0);
+                    if ui
+                        .add_sized(
+                            [ui.available_width(), 36.0],
+                            egui::Button::new(egui::RichText::new("Stop sharing").strong()),
+                        )
+                        .clicked()
+                    {
+                        stop_session(&self.shared);
+                    }
+                }
             });
             ui.add_space(14.0);
             card(ui, |ui| {
@@ -1071,6 +1188,7 @@ impl eframe::App for ViewGoApp {
             let builder = egui::ViewportBuilder::default()
                 .with_title("ViewGo Mirror")
                 .with_decorations(!self.borderless)
+                .with_icon(app_icon())
                 .with_inner_size([540.0, MIRROR_H])
                 .with_min_inner_size([240.0, 320.0]);
             ctx.show_viewport_immediate(mirror, builder, |mirror_ui, _| {
@@ -1435,6 +1553,7 @@ mod tests {
             seen_randoms: Mutex::new(Vec::new()),
             status: Mutex::new(String::new()),
             started: Mutex::new(None),
+            client: Mutex::new(None),
         })
     }
 
@@ -1477,6 +1596,39 @@ mod tests {
         assert_eq!(builder.dimensions, Some((1920, 1080)));
         builder.dimensions = Some((1080, 1920));
         assert_eq!(builder.dimensions, Some((1080, 1920)));
+    }
+
+    #[test]
+    fn app_icon_marks_the_brand() {
+        let icon = app_icon();
+        assert_eq!((icon.width, icon.height), (32, 32));
+        assert_eq!(icon.rgba.len(), 32 * 32 * 4);
+        let at = |x: usize, y: usize| &icon.rgba[(y * 32 + x) * 4..(y * 32 + x) * 4 + 4];
+        // centre of the white screen glyph
+        assert_eq!(at(16, 15), &[255, 255, 255, 255]);
+        // green tile above the screen
+        assert_eq!(at(16, 3), &[15, 123, 79, 255]);
+        // rounded corner is masked out by the launcher
+        assert_eq!(at(0, 0)[3], 0);
+    }
+
+    #[test]
+    fn stop_session_shuts_the_client_socket() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || listener.accept().unwrap().0);
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let accepted = server.join().unwrap();
+
+        let shared = shared(false);
+        *shared.client.lock().unwrap() = Some(client);
+        stop_session(&shared);
+
+        // The peer must see EOF: that is what ends serve() and resets the session.
+        let mut buf = [0u8; 4];
+        let mut reader = std::io::BufReader::new(accepted);
+        assert_eq!(reader.read(&mut buf).unwrap(), 0);
+        assert!(shared.client.lock().unwrap().is_some());
     }
 
     #[test]

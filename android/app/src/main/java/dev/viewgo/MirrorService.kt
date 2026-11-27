@@ -485,7 +485,10 @@ class MirrorService : Service() {
             try {
                 session.send(Proto.T_VIDEO_FRAME, frame)
             } catch (error: Exception) {
+                // The laptop closed the session (its Stop button, or it quit): stop capturing
+                // too, otherwise the phone keeps encoding into a dead socket forever.
                 AppLog.line("Video send stopped: ${error.message}")
+                stopMirroring("Stopped from laptop")
                 break
             }
             val took = SystemClock.elapsedRealtime() - started

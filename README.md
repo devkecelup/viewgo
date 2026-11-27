@@ -69,6 +69,13 @@ Installer (Inno Setup 6, compiles the standalone exe into a setup program):
 # output: dist/ViewGo-Setup-<version>.exe
 ```
 
+Brand artwork (launcher preview, wizard images at the fixed Inno sizes 76x76 / 164x314, and the
+exe icon) all comes from one geometry in `tools/make_icon.ps1`; re-run it after changing the logo:
+
+```powershell
+powershell -File tools\make_icon.ps1
+```
+
 Android APK (JDK 17 + Android SDK 35):
 
 ```powershell

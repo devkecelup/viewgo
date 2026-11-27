@@ -1,6 +1,6 @@
 [package]
 name = "viewgo-receiver"
-version = "0.1.0"
+version = "0.3.9"
 edition = "2021"
 description = "Windows receiver for ViewGo Android screen mirroring"
 license = "MIT"
@@ -13,3 +13,6 @@ mdns-sd = "0.22"
 pbkdf2 = { version = "0.12", features = ["simple"] }
 rand = "0.8"
 sha2 = "0.10"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"

@@ -23,6 +23,10 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputBaseFilename=ViewGo-Setup-{#MyAppVersion}
 OutputDir=..\dist
+; Brand visuals from tools/make_icon.ps1: wizard images have fixed Inno sizes (76x76 / 164x314).
+SetupIconFile=..\receiver\icon.ico
+WizardSmallImageFile=img\wizard-small.png
+WizardImageFile=img\wizard-large.png
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

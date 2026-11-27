@@ -77,25 +77,18 @@ class MainActivity : Activity() {
         setPadding(dp(18), dp(16), dp(18), dp(16))
     }
 
-    /** Timeline head: a numbered green circle, the step title, and the step's glyph on the right. */
-    private fun stepHead(step: String, iconRes: Int, title: String): LinearLayout =
+    /** Section head: the section glyph plus its title (no step numbers: the flow reads from
+     * position and status instead). */
+    private fun sectionHead(iconRes: Int, title: String): LinearLayout =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(
-                TextView(this@MainActivity).apply {
-                    text = step
-                    textSize = 13f
-                    typeface = Typeface.DEFAULT_BOLD
-                    setTextColor(Color.WHITE)
-                    gravity = Gravity.CENTER
-                    background = GradientDrawable().apply {
-                        shape = GradientDrawable.OVAL
-                        setColor(Color.parseColor(C_ACCENT))
-                    }
+                ImageView(this@MainActivity).apply {
+                    setImageResource(iconRes)
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 },
-                LinearLayout.LayoutParams(dp(26), dp(26)),
+                LinearLayout.LayoutParams(dp(20), dp(20)),
             )
             addView(
                 TextView(this@MainActivity).apply {
@@ -105,15 +98,8 @@ class MainActivity : Activity() {
                     typeface = Typeface.DEFAULT_BOLD
                 },
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    marginStart = dp(12)
+                    marginStart = dp(10)
                 },
-            )
-            addView(
-                ImageView(this@MainActivity).apply {
-                    setImageResource(iconRes)
-                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                },
-                LinearLayout.LayoutParams(dp(20), dp(20)),
             )
         }
 
@@ -249,21 +235,15 @@ class MainActivity : Activity() {
         }
     }
 
-    /**
-     * Adds a step card and, unless it is the last one, a short timeline line under its number so
-     * the three steps read as a sequence instead of three disconnected boxes.
-     */
-    private fun addStep(root: LinearLayout, card: View, last: Boolean) {
+    private fun addCard(root: LinearLayout, card: View) {
         root.addView(
             card,
             ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
         )
-        if (last) {
-            root.addView(View(this), ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(14)))
-        } else {
-            val line = View(this).apply { setBackgroundColor(Color.parseColor(C_BORDER)) }
-            root.addView(line, LinearLayout.LayoutParams(dp(2), dp(14)).apply { marginStart = dp(50) })
-        }
+        root.addView(
+            View(this),
+            ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(14)),
+        )
     }
 
     private fun cardGap(): LinearLayout.LayoutParams =
@@ -331,28 +311,68 @@ class MainActivity : Activity() {
         val gap = View(this)
         root.addView(gap, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(18)))
 
-        // Step 1: find the laptop
-        val laptopCard = card().apply {
-            addView(stepHead("1", R.drawable.ic_laptop, "Find your laptop"))
-            laptopStatus = TextView(this@MainActivity).apply {
-                text = "Not found yet. Start the receiver on your laptop first."
-                textSize = 14f
-                setTextColor(Color.parseColor(C_MUTED))
-                setPadding(0, dp(10), 0, dp(12))
-            }
-            addView(laptopStatus)
-            val find = Button(this@MainActivity).apply {
-                text = "Find laptop"
-                setOnClickListener { discoverReceiver() }
-            }
-            paintButton(find, true, R.drawable.ic_search)
-            addView(find, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        }
-        addStep(root, laptopCard, last = false)
+        // Connection: laptop row and code row in one compact card. No step numbers — the flow
+        // reads from position and status, which is what keeps it to a single screen.
+        val connectionCard = card().apply {
+            addView(sectionHead(R.drawable.ic_laptop, "Connection"))
 
-        // Step 2: pairing code
-        val codeCard = card().apply {
-            addView(stepHead("2", R.drawable.ic_key, "Enter the pairing code"))
+            val laptopRow = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(
+                    TextView(this@MainActivity).apply {
+                        text = "Laptop"
+                        textSize = 14f
+                        setTextColor(Color.parseColor(C_MUTED))
+                    },
+                    LinearLayout.LayoutParams(dp(58), ViewGroup.LayoutParams.WRAP_CONTENT),
+                )
+                laptopStatus = TextView(this@MainActivity).apply {
+                    text = "Not found yet"
+                    textSize = 14f
+                    setTextColor(Color.parseColor(C_INK))
+                    maxLines = 2
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                }
+                addView(
+                    laptopStatus,
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                )
+                // The old full-width Find button became a 44dp icon button on the row.
+                val find = TextView(this@MainActivity).apply {
+                    setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_search, 0, 0, 0)
+                    gravity = Gravity.CENTER
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(10).toFloat()
+                        setColor(Color.parseColor(C_SURFACE))
+                        setStroke(dp(1), Color.parseColor(C_BORDER))
+                    }
+                    contentDescription = "Find laptop"
+                    setOnClickListener { discoverReceiver() }
+                }
+                addView(
+                    find,
+                    LinearLayout.LayoutParams(dp(44), dp(44)).apply { marginStart = dp(10) },
+                )
+            }
+            addView(
+                laptopRow,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = dp(10) },
+            )
+
+            // Code row
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = "PAIRING CODE"
+                    textSize = 11f
+                    letterSpacing = 0.12f
+                    setTextColor(Color.parseColor(C_MUTED))
+                },
+                cardGap().apply { topMargin = dp(16) },
+            )
             codeField = EditText(this@MainActivity).apply {
                 hint = "e.g. H5T2"
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
@@ -361,22 +381,16 @@ class MainActivity : Activity() {
                 typeface = Typeface.MONOSPACE
                 letterSpacing = 0.3f
                 gravity = Gravity.CENTER
-                textSize = 26f
+                textSize = 24f
                 setTextColor(Color.parseColor(C_INK))
                 background = GradientDrawable().apply {
                     cornerRadius = dp(12).toFloat()
                     setColor(Color.parseColor(C_SURFACE))
                     setStroke(dp(1), Color.parseColor(C_BORDER))
                 }
-                setPadding(dp(14), dp(14), dp(14), dp(14))
+                setPadding(dp(14), dp(12), dp(14), dp(12))
             }
-            addView(
-                codeField,
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = dp(6) },
-            )
+            addView(codeField, cardGap().apply { topMargin = dp(6) })
             addView(
                 TextView(this@MainActivity).apply {
                     text = "Four characters, shown on your laptop."
@@ -387,11 +401,65 @@ class MainActivity : Activity() {
                 },
             )
         }
-        addStep(root, codeCard, last = false)
+        addCard(root, connectionCard)
+
+        // Flow picture: where the picture goes, with the live status right under it.
+        root.addView(
+            ImageView(this).apply {
+                setImageResource(R.drawable.ic_flow)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(150),
+            ).apply { topMargin = dp(6) },
+        )
+        root.addView(
+            TextView(this).apply {
+                text = "On the same Wi-Fi network first."
+                textSize = 13f
+                setTextColor(Color.parseColor(C_MUTED))
+                gravity = Gravity.CENTER
+            },
+            cardGap(),
+        )
+        val statusRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, dp(8), 0, 0)
+            statusDot = View(this@MainActivity).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.parseColor(C_ACCENT))
+                }
+            }
+            addView(
+                statusDot,
+                LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) },
+            )
+            statusLabel = TextView(this@MainActivity).apply {
+                text = "Start the receiver on your laptop, then find it here."
+                textSize = 14f
+                setTextColor(Color.parseColor(C_MUTED))
+            }
+            addView(
+                statusLabel,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
+        root.addView(statusRow, cardGap())
+        root.addView(
+            View(this),
+            cardGap().apply { height = dp(14) },
+        )
 
         // Step 3: options — chips instead of dropdowns, a switch for audio.
         val optionsCard = card().apply {
-            addView(stepHead("3", R.drawable.ic_settings, "Options"))
+            addView(sectionHead(R.drawable.ic_settings, "Options"))
 
             addView(optionLabel(R.drawable.ic_gauge, "Quality"), cardGap())
             addView(
@@ -426,7 +494,7 @@ class MainActivity : Activity() {
                 },
             )
         }
-        addStep(root, optionsCard, last = true)
+        addCard(root, optionsCard)
 
         // One primary action that changes with state: Start -> Stop.
         primaryButton = Button(this).apply {
@@ -446,36 +514,8 @@ class MainActivity : Activity() {
         paintButton(primaryButton, true, R.drawable.ic_play)
         root.addView(primaryButton, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
 
-        // Status line: a state dot plus one clear next step.
-        val statusRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            statusDot = View(this@MainActivity).apply {
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(Color.parseColor(C_ACCENT))
-                }
-            }
-            addView(statusDot, LinearLayout.LayoutParams(dp(8), dp(8)))
-            statusLabel = TextView(this@MainActivity).apply {
-                text = "Start the receiver on your laptop, then find it here."
-                textSize = 14f
-                setTextColor(Color.parseColor(C_MUTED))
-            }
-            addView(
-                statusLabel,
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    marginStart = dp(8)
-                },
-            )
-        }
-        root.addView(
-            statusRow,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(16) },
-        )
+        // Status lives under the flow picture above, so the bottom of the screen stays a single
+        // primary action.
 
         val scroll = ScrollView(this).apply { addView(root) }
         // Content must clear the status bar: with targetSdk 35 Android 15 draws edge-to-edge, so

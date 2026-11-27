@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Flow picture for the Android screen: phone -> wifi dots -> laptop showing the mirror
+     window. Same geometry as the receiver window's idle illustration and the launcher icon
+     (green tile, white screen). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="240dp"
+    android:height="120dp"
+    android:viewportWidth="240"
+    android:viewportHeight="120">
+
+    <!-- phone body -->
+    <path
+        android:fillColor="#0F7B4F"
+        android:pathData="M20,26 H48 A8,8 0 0 1 56,34 V88 A8,8 0 0 1 48,96 H20 A8,8 0 0 1 12,88 V34 A8,8 0 0 1 20,26 Z" />
+    <!-- phone screen -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M20,33 H48 A3,3 0 0 1 51,36 V78 A3,3 0 0 1 48,81 H20 A3,3 0 0 1 17,78 V36 A3,3 0 0 1 20,33 Z" />
+    <!-- phone home bar -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M25,86 h18 v3 h-18 z" />
+
+    <!-- wifi dots travelling to the laptop -->
+    <path
+        android:fillColor="#0F7B4F"
+        android:pathData="M71,60 a3,3 0 1 0 6,0 a3,3 0 1 0 -6,0 z" />
+    <path
+        android:fillColor="#0F7B4F"
+        android:pathData="M83,60 a4,4 0 1 0 8,0 a4,4 0 1 0 -8,0 z" />
+    <path
+        android:fillColor="#0F7B4F"
+        android:pathData="M96,60 a5,5 0 1 0 10,0 a5,5 0 1 0 -10,0 z" />
+
+    <!-- laptop: green frame = the mirror window -->
+    <path
+        android:fillColor="#0F7B4F"
+        android:pathData="M125,30 H205 A7,7 0 0 1 212,37 V87 A7,7 0 0 1 205,94 H125 A7,7 0 0 1 118,87 V37 A7,7 0 0 1 125,30 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M128,37 H202 A3,3 0 0 1 205,40 V80 A3,3 0 0 1 202,83 H128 A3,3 0 0 1 125,80 V40 A3,3 0 0 1 128,37 Z" />
+    <!-- stand and base -->
+    <path
+        android:fillColor="#0F7B4F"
+        android:pathData="M156,94 h18 v7 h-18 z" />
+    <path
+        android:fillColor="#0F7B4F"
+        android:pathData="M142,101 h46 a2,2 0 0 1 0,4 h-46 a2,2 0 0 1 0,-4 z" />
+</vector>
