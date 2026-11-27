@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="48" height="48" role="img" aria-label="ViewGo">
+  <!-- Extracted from android/app/src/main/res/drawable/ic_logo.xml -->
+  <path fill="#0F7B4F" d="M6 2h12a4 4 0 0 1 4 4v12a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V6a4 4 0 0 1 4-4z"/>
+  <path fill="#FFFFFF" d="M7 7h10v6H7z"/>
+  <path fill="#FFFFFF" d="M9.5 15h5v1.2h-5z"/>
+</svg>

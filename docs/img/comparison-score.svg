@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 400" width="860" height="400" role="img" aria-labelledby="chartTitle chartDesc">
+  <title id="chartTitle">Aggregate score out of 25</title>
+  <desc id="chartDesc">scrcpy 23, ViewGo 20, Phone Link 15, Vysor 14, ApowerMirror 14, AirDroid Cast 12.</desc>
+
+  <style>
+    .lbl   { font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+             font-size: 14px; font-weight: 600; fill: #101828; }
+    .val   { font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+             font-size: 13px; font-weight: 700; fill: #101828; }
+    .axis  { font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+             font-size: 12px; font-weight: 500; fill: #5F6772; }
+    .cap   { font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+             font-size: 10px; font-weight: 700; letter-spacing: 1.6px; fill: #5F6772; }
+    .chip  { font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+             font-size: 10px; font-weight: 700; letter-spacing: 1.2px; fill: #FFFFFF; }
+    .grid  { stroke: #E4E7EB; stroke-width: 1; }
+    .base  { stroke: #D3D8DF; stroke-width: 1; }
+    .bar   { fill: #D5DAE1; }
+    .own   { fill: #0F7B4F; }
+    .ownval{ fill: #0F7B4F; }
+    .band  { fill: #0F7B4F; fill-opacity: 0.07; }
+    .card  { fill: #FFFFFF; stroke: #E4E7EB; stroke-width: 1; }
+  </style>
+
+  <!-- card ground: fixed light surface so the chart renders the same in GitHub light and dark -->
+  <rect class="card" x="0.5" y="0.5" width="859" height="399" rx="16"/>
+
+  <text class="cap" x="24" y="34">AGGREGATE SCORE</text>
+  <text class="cap" x="836" y="34" text-anchor="end">MAX 25</text>
+
+  <!-- highlighted row: this project -->
+  <rect class="band" x="10" y="119" width="840" height="46" rx="12"/>
+
+  <!-- gridlines -->
+  <g class="grid" stroke-dasharray="3 5">
+    <line x1="300" y1="60" x2="300" y2="362"/>
+    <line x1="400" y1="60" x2="400" y2="362"/>
+    <line x1="500" y1="60" x2="500" y2="362"/>
+    <line x1="600" y1="60" x2="600" y2="362"/>
+    <line x1="700" y1="60" x2="700" y2="362"/>
+  </g>
+  <line class="base" x1="200" y1="60" x2="200" y2="362"/>
+
+  <!-- row 1: scrcpy 23 -->
+  <text class="lbl" x="178" y="97" text-anchor="end">scrcpy</text>
+  <rect class="bar" x="200" y="79" width="460" height="26" rx="7"/>
+  <text class="val" x="672" y="97">23 / 25</text>
+
+  <!-- row 2: ViewGo 20 -->
+  <text class="lbl" x="178" y="147" text-anchor="end">ViewGo</text>
+  <rect class="own" x="200" y="129" width="400" height="26" rx="7"/>
+  <text class="val ownval" x="612" y="147">20 / 25</text>
+  <rect class="own" x="758" y="131" width="84" height="22" rx="11"/>
+  <text class="chip" x="800" y="146" text-anchor="middle">THIS REPO</text>
+
+  <!-- row 3: Phone Link 15 -->
+  <text class="lbl" x="178" y="197" text-anchor="end">Phone Link</text>
+  <rect class="bar" x="200" y="179" width="300" height="26" rx="7"/>
+  <text class="val" x="512" y="197">15 / 25</text>
+
+  <!-- row 4: Vysor 14 -->
+  <text class="lbl" x="178" y="247" text-anchor="end">Vysor</text>
+  <rect class="bar" x="200" y="229" width="280" height="26" rx="7"/>
+  <text class="val" x="492" y="247">14 / 25</text>
+
+  <!-- row 5: ApowerMirror 14 -->
+  <text class="lbl" x="178" y="297" text-anchor="end">ApowerMirror</text>
+  <rect class="bar" x="200" y="279" width="280" height="26" rx="7"/>
+  <text class="val" x="492" y="297">14 / 25</text>
+
+  <!-- row 6: AirDroid Cast 12 -->
+  <text class="lbl" x="178" y="347" text-anchor="end">AirDroid Cast</text>
+  <rect class="bar" x="200" y="329" width="240" height="26" rx="7"/>
+  <text class="val" x="452" y="347">12 / 25</text>
+
+  <!-- axis ticks -->
+  <g class="axis" text-anchor="middle">
+    <text x="200" y="384">0</text>
+    <text x="300" y="384">5</text>
+    <text x="400" y="384">10</text>
+    <text x="500" y="384">15</text>
+    <text x="600" y="384">20</text>
+    <text x="700" y="384">25</text>
+  </g>
+</svg>
