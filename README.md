@@ -9,7 +9,8 @@ Read `PRD.md` for scope and `docs/PROTOCOL.md` for the wire format.
 ## Download
 
 - APK: [viewgo-debug.apk](https://github.com/devkecelup/viewgo/releases/latest/download/viewgo-debug.apk)
-- Windows receiver (installer, recommended): [ViewGo-Setup.exe](https://github.com/devkecelup/viewgo/releases/latest/download/ViewGo-Setup-0.3.7.exe)
+- Windows receiver (installer, recommended): grab `ViewGo-Setup-<version>.exe` from the
+  [latest release](https://github.com/devkecelup/viewgo/releases/latest)
 - Windows receiver (portable exe): [viewgo-receiver.exe](https://github.com/devkecelup/viewgo/releases/latest/download/viewgo-receiver.exe)
 
 ## What works now

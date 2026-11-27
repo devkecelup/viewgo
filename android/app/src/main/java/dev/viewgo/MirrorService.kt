@@ -72,6 +72,7 @@ class MirrorService : Service() {
     private var droppedFrames = 0L
     private var lastDropReport = 0L
     private var lastEncodeReport = 0L
+    private var rotationAttempts = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -263,18 +264,34 @@ class MirrorService : Service() {
             while (running) {
                 val nextOrientation = currentRotation()
                 if (nextOrientation != orientation) {
-                    orientation = nextOrientation
                     val size = captureSize(maxWidth, maxHeight)
                     AppLog.line("Phone rotated; rebuilding the encoder for ${size.first}×${size.second}")
                     try {
                         opened = rebuild(opened, size.first, size.second, bitrate)
+                        // Commit the orientation only after the swap succeeded, otherwise the
+                        // retry below never happens and the session stays portrait while the
+                        // screen is landscape — a black/squeezed picture that never recovers.
+                        orientation = nextOrientation
+                        rotationAttempts = 0
                         info = MediaCodec.BufferInfo()
                         csd = runCatching { readCsd(opened.codec.outputFormat) }.getOrNull()
                         sendVideoConfig(session, opened.width, opened.height)
                         updateNotification("Mirroring ${opened.width}×${opened.height}")
                     } catch (error: Throwable) {
-                        // Keep the running session instead of dropping it on a failed swap.
-                        AppLog.line("Rotation handling failed: ${error.message ?: error.javaClass.simpleName}")
+                        rotationAttempts++
+                        if (rotationAttempts >= 5) {
+                            // Bound the retries so a permanent failure cannot spin the encoder.
+                            orientation = nextOrientation
+                            rotationAttempts = 0
+                            AppLog.line(
+                                "Rotation kept failing; staying at ${opened.width}×${opened.height}",
+                            )
+                        } else {
+                            AppLog.line(
+                                "Rotation swap failed (${error.message ?: error.javaClass.simpleName}); retrying",
+                            )
+                            runCatching { Thread.sleep(50) }
+                        }
                     }
                     continue
                 }
@@ -346,8 +363,13 @@ class MirrorService : Service() {
 
     /**
      * MediaCodec dimensions are fixed once started, but Android only allows one
-     * createVirtualDisplay() per MediaProjection: the display itself is kept and only its
-     * surface is swapped onto the new encoder, then resized to the new orientation.
+     * createVirtualDisplay() per MediaProjection: the display is kept and only resized and
+     * re-surfaced onto a new encoder.
+     *
+     * Order matters: the display is detached from the old surface *first*. Swapping while the
+     * display is still rendering into a codec that is about to stop is what makes the handover
+     * fail on real devices (Android rejects it and the session keeps portrait dims while the
+     * screen is landscape, which shows as a black/squeezed frame).
      */
     private fun rebuild(
         old: Opened,
@@ -356,8 +378,20 @@ class MirrorService : Service() {
         bitrate: Int,
     ): Opened {
         val oldSurface = encoderSurface
-        val surface = beginEncoder(width, height, bitrate)
+
+        // 1. Detach so nothing renders into the codec we are about to stop.
+        runCatching { old.display.setSurface(null) }
+
+        // 2. New encoder first, so an allocation failure can still reattach the old one.
+        val surface = try {
+            beginEncoder(width, height, bitrate)
+        } catch (error: Throwable) {
+            runCatching { old.display.setSurface(oldSurface) }
+            throw error
+        }
         val codec = encoder ?: throw IOException("Encoder did not start")
+
+        // 3. Point the display at the new size and surface.
         try {
             old.display.resize(width, height, resources.configuration.densityDpi)
             old.display.setSurface(surface)
@@ -365,11 +399,13 @@ class MirrorService : Service() {
             runCatching { codec.stop() }
             runCatching { codec.release() }
             runCatching { surface.release() }
-            // Restore the fields to the encoder that is still feeding the display.
             encoder = old.codec
             encoderSurface = oldSurface
+            runCatching { old.display.setSurface(oldSurface) }
             throw error
         }
+
+        // 4. Only now is the old codec unreachable and safe to release.
         runCatching { old.codec.signalEndOfInputStream() }
         runCatching { old.codec.stop() }
         runCatching { old.codec.release() }
