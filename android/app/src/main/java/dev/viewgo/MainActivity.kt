@@ -2,7 +2,10 @@ package dev.viewgo
 
 import android.Manifest
 import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
@@ -29,6 +32,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
+import java.net.Inet4Address
 
 // Palette dealt by design-taste-frontend (`start.mjs brand --page software --bg #fff
 // --accent #0f7b4f --radius soft`): white ground, green action, radius soft.
@@ -43,20 +47,40 @@ private const val C_ERROR = "#B42318"
 class MainActivity : Activity() {
 
     private lateinit var codeField: EditText
+    private lateinit var hostField: EditText
     private lateinit var statusLabel: TextView
     private lateinit var laptopStatus: TextView
     private lateinit var statusDot: View
     private lateinit var primaryButton: Button
-    private var selectedHost: String? = null
-    private var selectedPort: Int = 47810
+    private var mirroring = false
 
     // Option state — chip rows and a switch replace the old spinners.
     private var qualityIndex = 0
+    private var fpsIndex = 0
     private var shareIndex = 0
     private var audioOn = true
-    private var mirroring = false
 
     private var pending: Pending? = null
+
+    /** Service -> UI state: the activity is often in the background while pairing happens. */
+    private val stateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent == null) return
+            val message = intent.getStringExtra(MirrorService.EXTRA_MESSAGE) ?: return
+            val error = intent.getBooleanExtra(MirrorService.EXTRA_ERROR, false)
+            when (intent.getStringExtra(MirrorService.EXTRA_STATE)) {
+                MirrorService.STATE_LIVE -> {
+                    setStatus(message)
+                    setMirroring(true)
+                }
+                MirrorService.STATE_STOPPED -> {
+                    setStatus(message, error)
+                    setMirroring(false)
+                }
+                else -> setStatus(message, error)
+            }
+        }
+    }
 
     private data class Pending(
         val host: String,
@@ -65,6 +89,7 @@ class MainActivity : Activity() {
         val width: Int,
         val height: Int,
         val bitrate: Int,
+        val fps: Int,
         val audio: Boolean,
     )
 
@@ -360,7 +385,7 @@ class MainActivity : Activity() {
                     LinearLayout.LayoutParams(dp(22), dp(22)),
                 )
                 laptopStatus = TextView(this@MainActivity).apply {
-                    text = "Tap the search button to find your laptop."
+                    text = "Tap search, or type the laptop's IP address below."
                     textSize = 15f
                     setTextColor(Color.parseColor(C_MUTED))
                     maxLines = 2
@@ -383,6 +408,33 @@ class MainActivity : Activity() {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                 ).apply { topMargin = dp(12) },
+            )
+
+            addView(optionLabel(R.drawable.ic_laptop, "Laptop IP (IPv4)"), cardGap().apply { topMargin = dp(18) })
+            hostField = EditText(this@MainActivity).apply {
+                hint = "192.168.1.24"
+                // Digits plus the two separators a manual address needs; no alphabetic keyboard.
+                keyListener = android.text.method.DigitsKeyListener.getInstance("0123456789.:")
+                filters = arrayOf(InputFilter.LengthFilter(21))
+                setSingleLine()
+                typeface = Typeface.MONOSPACE
+                textSize = 18f
+                setTextColor(Color.parseColor(C_INK))
+                setHintTextColor(Color.parseColor(C_MUTED))
+                background = codeBg(false)
+                onFocusChangeListener = View.OnFocusChangeListener { _, hasFocus ->
+                    background = codeBg(hasFocus)
+                }
+                setPadding(dp(16), dp(16), dp(16), dp(16))
+            }
+            addView(hostField, cardGap().apply { topMargin = dp(8) })
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = "Optional. Type the laptop's IPv4 address if the search shows an IPv6 one. Add :port only if your receiver uses another port."
+                    textSize = 12f
+                    setTextColor(Color.parseColor(C_MUTED))
+                    setPadding(0, dp(8), 0, 0)
+                },
             )
 
             addView(optionLabel(R.drawable.ic_key, "Pairing code"), cardGap().apply { topMargin = dp(18) })
@@ -476,15 +528,21 @@ class MainActivity : Activity() {
         content.addView(statusRow, cardGap())
         content.addView(View(this), cardGap().apply { height = dp(12) })
 
-        // Options card: quality, share target, audio.
+        // Options card: quality, frame rate, share target, audio.
         val optionsCard = card().apply {
             addView(sectionHead(R.drawable.ic_settings, "Options"))
 
             addView(optionLabel(R.drawable.ic_gauge, "Quality"), cardGap())
             addView(
-                chipGroup(listOf("1080p · 16 Mbps", "720p · 6 Mbps"), qualityIndex) {
+                chipGroup(listOf("1080p", "720p"), qualityIndex) {
                     qualityIndex = it
                 },
+                cardGap().apply { topMargin = dp(6) },
+            )
+
+            addView(optionLabel(R.drawable.ic_flow, "Frame rate"), cardGap().apply { topMargin = dp(16) })
+            addView(
+                chipGroup(listOf("30 fps", "60 fps"), fpsIndex) { fpsIndex = it },
                 cardGap().apply { topMargin = dp(6) },
             )
 
@@ -506,7 +564,8 @@ class MainActivity : Activity() {
 
             addView(
                 TextView(this@MainActivity).apply {
-                    text = "1080p is best effort. If the phone gets hot, use 720p."
+                    text = "1080p is best effort. 60 fps needs a stronger phone and more bitrate; " +
+                        "if the phone gets hot, use 720p."
                     textSize = 12f
                     setTextColor(Color.parseColor(C_MUTED))
                     setPadding(0, dp(14), 0, 0)
@@ -565,6 +624,15 @@ class MainActivity : Activity() {
         }
         outer.requestApplyInsets()
 
+        hostField.setText(getPreferences(MODE_PRIVATE).getString(PREF_TARGET, ""))
+        val stateFilter = IntentFilter(MirrorService.ACTION_STATE)
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(stateReceiver, stateFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(stateReceiver, stateFilter)
+        }
+
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -572,27 +640,43 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onDestroy() {
+        runCatching { unregisterReceiver(stateReceiver) }
+        super.onDestroy()
+    }
+
     private fun requestCapture() {
-        val host = selectedHost
-        val code = normalizeCode(codeField.text.toString())
-        if (host == null) {
-            setStatus("Search for your laptop first.", error = true)
-            laptopStatus.setTextColor(Color.parseColor(C_ERROR))
+        val typed = hostField.text.toString()
+        val target = parseTarget(typed)
+        if (target == null) {
+            setStatus("Enter the laptop's IPv4 address, like 192.168.1.24.", error = true)
+            hostField.requestFocus()
             return
         }
+        val code = normalizeCode(codeField.text.toString())
         if (code == null) {
             setStatus("The pairing code has 4 letters or digits.", error = true)
             return
         }
+        val (host, port) = target
+        getPreferences(MODE_PRIVATE).edit().putString(PREF_TARGET, typed.trim()).apply()
         val quality = qualityIndex
         val audio = audioOn
+        val fps = if (fpsIndex == 1) 60 else 30
         pending = Pending(
             host = host,
-            port = selectedPort,
+            port = port,
             code = code,
             width = if (quality == 0) 1080 else 720,
             height = if (quality == 0) 1920 else 1280,
-            bitrate = if (quality == 0) 16_000_000 else 6_000_000,
+            // 60 fps needs roughly a third more bitrate to keep the same detail per frame.
+            bitrate = when {
+                quality == 0 && fps == 60 -> 24_000_000
+                quality == 0 -> 16_000_000
+                fps == 60 -> 10_000_000
+                else -> 6_000_000
+            },
+            fps = fps,
             audio = audio,
         )
         val manager = getSystemService(MediaProjectionManager::class.java)
@@ -632,20 +716,19 @@ class MainActivity : Activity() {
             putExtra(MirrorService.EXTRA_WIDTH, job.width)
             putExtra(MirrorService.EXTRA_HEIGHT, job.height)
             putExtra(MirrorService.EXTRA_BITRATE, job.bitrate)
+            putExtra(MirrorService.EXTRA_FPS, job.fps)
             putExtra(MirrorService.EXTRA_AUDIO, job.audio)
             putExtra(MirrorService.EXTRA_RESULT_CODE, resultCode)
             putExtra(MirrorService.EXTRA_RESULT_DATA, data)
         }
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
         setMirroring(true)
-        setStatus("Mirroring started. You can leave this app.")
+        setStatus("Connecting to ${job.host}…")
         AppLog.line("Capture approved, starting the service")
         moveTaskToBack(true)
     }
 
     private fun discoverReceiver() {
-        selectedHost = null
-        selectedPort = 47810
         laptopStatus.setTextColor(Color.parseColor(C_MUTED))
         laptopStatus.text = "Searching your Wi-Fi for the laptop..."
         setStatus("Searching local Wi-Fi...")
@@ -656,7 +739,7 @@ class MainActivity : Activity() {
                 manager.stopServiceDiscovery(this)
                 runOnUiThread {
                     laptopStatus.text = "Wi-Fi discovery failed (code $error)."
-                    setStatus("Wi-Fi discovery failed.", error = true)
+                    setStatus("Wi-Fi discovery failed. Type the laptop's IP address instead.", error = true)
                 }
             }
 
@@ -672,33 +755,56 @@ class MainActivity : Activity() {
                         override fun onResolveFailed(service: NsdServiceInfo, error: Int) {
                             runOnUiThread {
                                 laptopStatus.text = "Could not resolve laptop (code $error)."
-                                setStatus("Could not resolve the laptop.", error = true)
+                                setStatus("Could not resolve the laptop. Type its IP address instead.", error = true)
                             }
                         }
 
                         override fun onServiceResolved(resolved: NsdServiceInfo) {
-                            selectedHost = resolved.host.hostAddress
-                            selectedPort = resolved.port
+                            // mDNS advertises every address the laptop has, and Android can hand
+                            // back the IPv6 one while the receiver listens on IPv4 only.
+                            val address = preferredIpv4(resolved)
+                            if (address == null) {
+                                runOnUiThread {
+                                    laptopStatus.setTextColor(Color.parseColor(C_ERROR))
+                                    laptopStatus.text = "Found ${resolved.serviceName}, but only over IPv6."
+                                    setStatus("Type the laptop's IPv4 address above.", error = true)
+                                }
+                                return
+                            }
+                            val target = if (resolved.port == 47810) address else "$address:${resolved.port}"
                             runOnUiThread {
+                                hostField.setText(target)
                                 laptopStatus.setTextColor(Color.parseColor(C_ACCENT))
-                                laptopStatus.text = "Connected to ${resolved.serviceName}. Now enter the code."
+                                laptopStatus.text = "Found ${resolved.serviceName} at $address. Enter the code."
                                 setStatus("Laptop found. Enter the pairing code.")
                             }
-                            AppLog.line("Local discovery found ${resolved.serviceName}")
+                            AppLog.line("Local discovery found ${resolved.serviceName} at $target")
                         }
                     })
                 } catch (error: UnsupportedOperationException) {
                     runOnUiThread {
                         laptopStatus.text = "This Android version cannot resolve local services."
-                        setStatus("Discovery unavailable on this Android version.", error = true)
+                        setStatus("Discovery unavailable. Type the laptop's IP address instead.", error = true)
                     }
                 }
             }
         })
     }
 
+    private fun preferredIpv4(service: NsdServiceInfo): String? {
+        if (Build.VERSION.SDK_INT >= 34) {
+            return service.hostAddresses
+                .firstOrNull { it is Inet4Address }
+                ?.hostAddress
+        }
+        @Suppress("DEPRECATION")
+        val host = service.host ?: return null
+        return if (host is Inet4Address) host.hostAddress else null
+    }
+
     companion object {
         private const val REQUEST_CAPTURE = 1001
+        private const val PREF_TARGET = "target"
     }
 
 }

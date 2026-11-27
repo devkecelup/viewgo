@@ -9,6 +9,7 @@ license = "MIT"
 aes-gcm = "0.10"
 eframe = "0.37.0"
 hmac = "0.12"
+if-addrs = "0.15"
 mdns-sd = "0.22"
 pbkdf2 = { version = "0.12", features = ["simple"] }
 rand = "0.8"

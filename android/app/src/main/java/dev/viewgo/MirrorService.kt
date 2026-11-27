@@ -36,6 +36,13 @@ class MirrorService : Service() {
 
     companion object {
         const val ACTION_STOP = "dev.viewgo.STOP"
+        const val ACTION_STATE = "dev.viewgo.STATE"
+        const val EXTRA_STATE = "state"
+        const val EXTRA_MESSAGE = "message"
+        const val EXTRA_ERROR = "error"
+        const val STATE_CONNECTING = "connecting"
+        const val STATE_LIVE = "live"
+        const val STATE_STOPPED = "stopped"
 
         const val EXTRA_HOST = "host"
         const val EXTRA_PORT = "port"
@@ -43,13 +50,14 @@ class MirrorService : Service() {
         const val EXTRA_WIDTH = "width"
         const val EXTRA_HEIGHT = "height"
         const val EXTRA_BITRATE = "bitrate"
+        const val EXTRA_FPS = "fps"
         const val EXTRA_RESULT_CODE = "resultCode"
         const val EXTRA_RESULT_DATA = "resultData"
         const val EXTRA_AUDIO = "audio"
 
         private const val CHANNEL = "viewgo"
         private const val NOTIFICATION_ID = 1
-        private const val FPS = 30
+        private const val DEFAULT_FPS = 30
         private const val SERVICE_TYPE_MEDIA_PROJECTION = 0x00000020
         private const val SERVICE_TYPE_MEDIA_PLAYBACK = 0x00000002
     }
@@ -71,8 +79,22 @@ class MirrorService : Service() {
     private var lastSyncRequest = 0L
     private var droppedFrames = 0L
     private var lastDropReport = 0L
+    /**
+     * Adaptive bitrate. The encoder target follows what the socket actually carries: the sender
+     * thread lowers it when writes block, the encode loop applies it. Screen content rarely needs
+     * the full 16 Mbps, so this keeps the picture moving on a weak link instead of filling the
+     * send buffer until frames are dropped.
+     */
+    @Volatile
+    private var videoBitrate = 0
+    private var bitrateTarget = 0
+    private var appliedBitrate = 0
+    private var lastBitrateCut = 0L
+    private var lastEncoderReport = 0L
     private var lastEncodeReport = 0L
     private var rotationAttempts = 0
+    /** Encoder frame rate target for this session: 30 by default, 60 when the user asks for it. */
+    private var targetFps = DEFAULT_FPS
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -103,9 +125,13 @@ class MirrorService : Service() {
         val maxWidth = intent.getIntExtra(EXTRA_WIDTH, 1080)
         val maxHeight = intent.getIntExtra(EXTRA_HEIGHT, 1920)
         val bitrate = intent.getIntExtra(EXTRA_BITRATE, 12_000_000)
+        // Capture at 60 fps only when asked: it is the encoder's heaviest setting and the laptop
+        // can only show what the phone encodes.
+        targetFps = intent.getIntExtra(EXTRA_FPS, DEFAULT_FPS).coerceIn(15, 60)
 
         intentAudioRequested = intent.getBooleanExtra(EXTRA_AUDIO, true)
         startForegroundCompat("Connecting to $host…")
+        broadcastState(STATE_CONNECTING, "Connecting to $host:$port…")
         running = true
         AppLog.line("Connecting to $host:$port")
         AppLog.attach { text -> runCatching { link?.send(Proto.T_LOG, text.toByteArray()) } }
@@ -128,6 +154,7 @@ class MirrorService : Service() {
                 link = session
                 AppLog.line("Paired with $host")
                 updateNotification("Paired. Starting capture…")
+                broadcastState(STATE_LIVE, "Mirroring started. You can leave this app.")
 
                 val manager = getSystemService(MediaProjectionManager::class.java)
                 val capture = manager.getMediaProjection(resultCode, resultData)
@@ -143,7 +170,7 @@ class MirrorService : Service() {
                 mirror(session, capture, maxWidth, maxHeight, bitrate, audioRequested)
             } catch (error: Throwable) {
                 AppLog.line("Stopped: ${error.message ?: error.javaClass.simpleName}")
-                if (running) stopMirroring("Stopped: ${error.message ?: error.javaClass.simpleName}")
+                if (running) stopMirroring("Stopped: ${error.message ?: error.javaClass.simpleName}", error = true)
             } finally {
                 releaseAll()
             }
@@ -174,7 +201,7 @@ class MirrorService : Service() {
                     MediaFormat.KEY_BITRATE_MODE,
                     MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR,
                 )
-                setInteger(MediaFormat.KEY_FRAME_RATE, FPS)
+                setInteger(MediaFormat.KEY_FRAME_RATE, targetFps)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
                 // Screen mirroring needs the lowest possible delay, not compression efficiency:
                 // priority 0 tells the encoder to trade quality for latency, and zero B-frames
@@ -249,6 +276,10 @@ class MirrorService : Service() {
         }
         updateNotification("Mirroring ${opened.width}×${opened.height}")
         AppLog.line("Mirroring ${opened.width}×${opened.height} at ${bitrate / 1_000_000} Mbps")
+        // Start from the requested rate and let the sender thread adapt it to the link.
+        bitrateTarget = bitrate
+        videoBitrate = bitrate
+        appliedBitrate = bitrate
 
         val audio = if (audioRequested) startAudioCapture(projection, session) else null
         val audioThread = startAudioThread(session, audio)
@@ -260,6 +291,24 @@ class MirrorService : Service() {
         var orientation = currentRotation()
         var info = MediaCodec.BufferInfo()
 
+        // Encoder output rate: when the phone cannot encode the capture size in real time the
+        // stream is slow no matter how good the network is, and that is worth saying once instead
+        // of leaving it a mystery.
+        var encoded = 0
+        var encodeWindow = SystemClock.elapsedRealtime()
+        fun noteEncoded() {
+            encoded++
+            val now = SystemClock.elapsedRealtime()
+            if (now - encodeWindow < 1_000) return
+            val fps = encoded * 1_000 / (now - encodeWindow)
+            if (fps < targetFps - 5 && now - lastEncoderReport >= 5_000) {
+                lastEncoderReport = now
+                AppLog.line("encoder $fps fps (target $targetFps): ${opened.width}×${opened.height} is heavy for this phone")
+            }
+            encoded = 0
+            encodeWindow = now
+        }
+
         try {
             while (running) {
                 val nextOrientation = currentRotation()
@@ -267,7 +316,7 @@ class MirrorService : Service() {
                     val size = captureSize(maxWidth, maxHeight)
                     AppLog.line("Phone rotated; rebuilding the encoder for ${size.first}×${size.second}")
                     try {
-                        opened = rebuild(opened, size.first, size.second, bitrate)
+                        opened = rebuild(opened, size.first, size.second, videoBitrate)
                         // Commit the orientation only after the swap succeeded, otherwise the
                         // retry below never happens and the session stays portrait while the
                         // screen is landscape — a black/squeezed picture that never recovers.
@@ -276,6 +325,7 @@ class MirrorService : Service() {
                         info = MediaCodec.BufferInfo()
                         csd = runCatching { readCsd(opened.codec.outputFormat) }.getOrNull()
                         sendVideoConfig(session, opened.width, opened.height)
+                        appliedBitrate = videoBitrate
                         updateNotification("Mirroring ${opened.width}×${opened.height}")
                     } catch (error: Throwable) {
                         rotationAttempts++
@@ -297,6 +347,14 @@ class MirrorService : Service() {
                 }
 
                 val codec = opened.codec
+                if (appliedBitrate != videoBitrate) {
+                    appliedBitrate = videoBitrate
+                    runCatching {
+                        codec.setParameters(android.os.Bundle().apply {
+                            putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, videoBitrate)
+                        })
+                    }
+                }
                 val index = codec.dequeueOutputBuffer(info, 10_000)
                 if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     csd = readCsd(codec.outputFormat)
@@ -314,6 +372,7 @@ class MirrorService : Service() {
                         putLong(payload, 1, info.presentationTimeUs)
                         System.arraycopy(nal, 0, payload, 9, nal.size)
                         reportEncodeDelay(info.presentationTimeUs)
+                        noteEncoded()
                         if (keyframe) needSync = false
                         if (needSync) {
                             // Waiting for the IDR requested after a drop: sending a P-frame that
@@ -527,7 +586,7 @@ class MirrorService : Service() {
         session.send(Proto.T_VIDEO_CONFIG, ByteArray(5).apply {
             putShort(this, 0, width)
             putShort(this, 2, height)
-            this[4] = FPS.toByte()
+            this[4] = targetFps.toByte()
         })
     }
 
@@ -610,11 +669,12 @@ class MirrorService : Service() {
         return bytes
     }
 
-    private fun stopMirroring(reason: String) {
+    private fun stopMirroring(reason: String, error: Boolean = false) {
         if (!running) return
         running = false
         AppLog.line(reason)
         updateNotification(reason)
+        broadcastState(STATE_STOPPED, reason, error)
         runCatching { encoder?.signalEndOfInputStream() }
         runCatching { audioRecord?.stop() }
         runCatching { link?.sendStop() }
@@ -663,6 +723,19 @@ class MirrorService : Service() {
     private fun updateNotification(text: String) {
         runCatching {
             getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(text))
+        }
+    }
+
+    /** Tells the activity (if it is still alive) why the session started or ended. */
+    private fun broadcastState(state: String, message: String, error: Boolean = false) {
+        runCatching {
+            sendBroadcast(
+                Intent(ACTION_STATE)
+                    .setPackage(packageName)
+                    .putExtra(EXTRA_STATE, state)
+                    .putExtra(EXTRA_MESSAGE, message)
+                    .putExtra(EXTRA_ERROR, error),
+            )
         }
     }
 
